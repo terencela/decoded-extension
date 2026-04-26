@@ -1,4 +1,10 @@
-import { ARCHETYPE_LABELS, type Archetype } from "../shared/constants";
+import {
+  ARCHETYPE_LABELS,
+  type Archetype,
+  type DetectionSource,
+  type ConfidenceBand,
+  getConfidenceBand,
+} from "../shared/constants";
 
 export type { Archetype } from "../shared/constants";
 export { getArchetypeLabel } from "../shared/constants";
@@ -8,18 +14,23 @@ export interface PatternMatch {
   text: string;
   index: number;
   weight: number;
+  source?: DetectionSource;
 }
 
 export interface ClassificationResult {
   archetype: Archetype;
   confidence: number;
   aiScore: number;
+  aiBand: ConfidenceBand;
+  aiBandLabel: string;
   detectedPatterns: string[];
   aiSignals: string[];
   matches: PatternMatch[];
   isHardEngagementFarming: boolean;
   needsApiConfirmation: boolean;
   isComment?: boolean;
+  detectionSources: DetectionSource[];
+  llmReason?: string;
 }
 
 export interface AIScoreResult {
@@ -27,6 +38,7 @@ export interface AIScoreResult {
   patterns: string[];
   matches: PatternMatch[];
   needsAPIConfirmation: boolean;
+  sources: DetectionSource[];
 }
 
 interface ScoreBundle {
@@ -191,6 +203,7 @@ function scoreConsensusWisdom(text: string): ScoreBundle {
 }
 
 function computeAIScore(text: string): AIScoreResult {
+  // Layer A: vocabulary — single-word AI signature
   const layerA: ReadonlyArray<readonly [RegExp, string, number]> = [
     [/\bdelve\b/i, '"delve" (AI signature word)', 18],
     [/\btapestry\b/i, '"tapestry" (AI signature word)', 18],
@@ -217,28 +230,59 @@ function computeAIScore(text: string): AIScoreResult {
     [/game.?changer/i, '"game-changer" (AI vocabulary)', 7],
     [/it'?s worth (noting|mentioning)/i, '"It\'s worth noting" (AI filler)', 12],
     [/it bears (noting|mentioning)/i, '"It bears mentioning" (AI filler)', 12],
+    [/\b(meticulously|painstakingly|elegantly|gracefully)\b/i, "AI adverb cluster", 8],
+    [/\b(plethora|myriad|cornucopia|smorgasbord)\b/i, "AI quantity word", 12],
+    [/\b(synergize|synergy|synergistic)\b/i, "Synergy AI vocabulary", 10],
+    [/\b(holistic|holistically)\b/i, '"holistic" (AI vocabulary)', 8],
+    [/\b(actionable insights?|actionable takeaways?)\b/i, '"actionable insights" template phrase', 14],
+    [/\bnavigate (the|this) (complex|complexity|landscape|terrain|nuances?)/i, '"navigate the complexity" template', 14],
+    [/at the (intersection|forefront|core|heart) of/i, '"at the intersection of" template', 12],
+    [/\bcrucial\b/i, '"crucial" (AI hedging)', 6],
+    [/\bvital\b/i, '"vital" (AI hedging)', 6],
+    [/\bessential\b/i, '"essential" (AI hedging)', 5],
+    [/\bcomprehensive\b/i, '"comprehensive" (AI vocabulary)', 6],
+    [/\bsophisticated\b/i, '"sophisticated" (AI vocabulary)', 6],
+    [/\b(unprecedented|unparalleled|unmatched)\b/i, "AI superlative", 8],
   ];
 
+  // Layer B: structural tells from tropes.fyi
   const layerB: ReadonlyArray<readonly [RegExp, string, number]> = [
-    [/[Ii]t'?s not .{3,40}[—\-\u2014].{3,40}[Ii]t'?s/i, "Negative parallelism (AI #1 tell)", 22],
-    [/[Hh]ere'?s (the (thing|kicker|deal|truth|catch|irony)|where it gets|what most people)/i, '"Here\'s the kicker" family', 16],
+    [/[Ii]t'?s not .{3,40}[—\-\u2014\.].{3,40}[Ii]t'?s/i, "Negative parallelism (AI #1 tell)", 22],
+    [/[Ii]t'?s not (just |only |simply |merely )?(about |that )?\w+[.,]\s+[Ii]t'?s/i, "Negative parallelism (period form)", 20],
+    [/[Hh]ere'?s (the (thing|kicker|deal|truth|catch|irony|reality|secret)|where it gets|what most people|why)/i, '"Here\'s the kicker" family', 16],
     [/[Ll]et'?s (break (this|it) down|unpack|dive in|dig into|explore this)/i, 'Pedagogical "let\'s" voice', 14],
-    [/[Ii]n today'?s (fast.?paced|rapidly evolving|competitive|digital|changing) landscape/i, "Landscape opener template", 18],
-    [/[Ii]t'?s not just about .{5,50}[—\-\u2014].{3,50}[Ii]t'?s (also )?about/i, "Pivot construction", 16],
+    [/[Ii]n today'?s (fast.?paced|rapidly evolving|competitive|digital|changing|complex|interconnected) (landscape|world|environment|economy|market)/i, "Landscape opener template", 20],
+    [/[Ii]t'?s not just about .{5,50}[—\-\u2014\.].{3,50}[Ii]t'?s (also )?about/i, "Pivot construction", 16],
     [/[Ii]magine (a world|if|when) (where|you|we)/i, 'AI "Imagine" invitation', 14],
     [/[Ii]'?ve been (thinking|reflecting|pondering) (a lot )?(about|on)/i, '"I\'ve been thinking" opener', 14],
     [/^[Ii]n (conclusion|summary|closing)/im, "Signposted conclusion", 16],
-    [/Not \w+[.,] [Nn]ot \w+[.,] (Just|Only|Simply|But) /i, "Triple negation reveal", 16],
+    [/[Nn]ot \w+[.,]?\s+[Nn]ot \w+[.,]?\s+(Just|Only|Simply|But|Pure|Real)\s/i, "Triple negation reveal", 18],
     [/[Ff]undamentally reshape|redefine (how|what)|at an inflection point/i, "Grandiose stakes inflation", 14],
-    [/[Dd]espite (its|these|those|the) (challenges|obstacles|difficulties|limitations)/i, '"Despite its challenges" formula', 12],
+    [/[Dd]espite (its|these|those|the) (challenges|obstacles|difficulties|limitations|complexities)/i, '"Despite its challenges" formula', 12],
     [/[Ee]xperts (say|argue|suggest|claim)(?! .{1,30}(dr\.|prof\.|[A-Z][a-z]+ [A-Z][a-z]+))/i, "Vague attribution", 12],
     [/[Rr]esearch shows(?! .{1,30}(journal|university|[A-Z]))/i, "Unattributed research claim", 12],
     [/[Ss]tudies (suggest|indicate|show)(?! .{1,30}(published|journal))/i, "Vague study attribution", 12],
     [/[Ii]n this (post|thread|article),? I('?ll| will) (cover|explore|share)/i, "Fractal summary opener", 14],
-    [/(serves|stands|marks|functions|operates) as (a|an|the) /i, '"Serves as" dodge', 10],
+    [/(serves|stands|marks|functions|operates) as (a|an|the) /i, '"Serves as" dodge', 12],
     [/[Tt]hink of (it|this) (as|like)/i, "Patronizing analogy mode", 10],
-    [/[Mm]aybe the \w+ isn'?t .{3,30}[—\-\u2014].{3,30}it'?s/i, "Philosophical aphorism (AI form)", 14],
+    [/[Mm]aybe the \w+ isn'?t .{3,30}[—\-\u2014\.].{3,30}it'?s/i, "Philosophical aphorism (AI form)", 16],
     [/[Mm]ost (people|companies|leaders|teams) .{5,60}(successful|winners|top \d+%|few|best) .{0,40}(do|are|have|know)/i, "False dichotomy", 14],
+    // The reframe: "The question isn't X. The question is Y."
+    [/[Tt]he (question|issue|problem|point|truth) (isn'?t|is not) .{3,60}[\.\?]\s*[Tt]he \1 is/i, '"The question isn\'t X" reframe', 20],
+    // Fragment reveal: "The result? Devastating." / "The fix? Simple."
+    [/[A-Z]\w+ (result|fix|answer|catch|truth|reality|kicker|problem|reason)\?\s+[A-Z]\w+\.?/, "Fragment reveal pattern", 16],
+    // False urgency
+    [/[Nn]ow,? more than ever/i, '"Now, more than ever" false urgency', 16],
+    [/[Ii]n a world where/i, '"In a world where" false urgency', 14],
+    // Performed humility
+    [/[Ii]'?m (just |only )?(one person|a \w+, but|no expert)/i, "Performed humility opener", 14],
+    [/[Tt]ake this with a grain of salt/i, "Performed humility hedge", 12],
+    // Ending CTA frame
+    [/[Aa]gree\?\s+[Dd]isagree\?/i, '"Agree? Disagree?" closer', 14],
+    // Conclusion-as-revelation
+    [/[Tt]he (lesson|takeaway|truth|reality|insight) here is/i, "Conclusion-as-revelation", 12],
+    // Anaphora setup ("X is Y. X is Z. X is W." captured statistically below)
+    [/[Tt]his (isn'?t|is not) (a |an |just )?\w+\.\s+[Tt]his is/i, "Anaphora reveal", 14],
   ];
 
   const a = runChecks(text, layerA);
@@ -246,56 +290,211 @@ function computeAIScore(text: string): AIScoreResult {
   let score = a.score + b.score;
   const patterns = [...a.patterns, ...b.patterns];
   const matches = [...a.matches, ...b.matches];
+  const sources = new Set<DetectionSource>();
+  if (a.matches.length > 0 || b.matches.length > 0) sources.add("regex");
 
-  const sentences = text.split(/[.!?]+/).filter((s) => s.trim().length > 5);
-  if (sentences.length >= 4) {
-    const lengths = sentences.map((s) => s.trim().split(/\s+/).length);
-    const avg = lengths.reduce((sum, n) => sum + n, 0) / lengths.length;
-    const variance = lengths.reduce((sum, n) => sum + Math.pow(n - avg, 2), 0) / lengths.length;
-    if (variance < 8 && avg < 20) {
-      patterns.push("Uniform sentence length (AI pattern)");
-      score += 15;
-    }
-  }
-
-  const words = text.split(/\s+/);
-  const properNouns = (text.match(/\b[A-Z][a-z]{2,}\b/g) || []).filter(
-    (w) =>
-      !["I", "I'm", "I've", "LinkedIn", "The", "This", "That", "These", "Those", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday"].includes(w)
-  );
-  const properNounDensity = properNouns.length / Math.max(words.length, 1);
-  if (properNounDensity < 0.02 && words.length > 50) {
-    patterns.push("Near-zero proper noun density (AI signal)");
-    score += 15;
-  }
-
-  const lineBreaks = (text.match(/\n/g) || []).length;
-  const lineBreakRatio = lineBreaks / Math.max(words.length, 1);
-  if (lineBreakRatio > 0.2 && lineBreaks > 8) {
-    patterns.push("One-sentence-per-line formatting (AI pattern)");
-    score += 12;
-  }
-
-  const emDashes = (text.match(/[—\u2014]/g) || []).length;
-  if (emDashes > 4) {
-    patterns.push("Em-dash overuse (AI pattern)");
-    score += 10;
-  }
-
-  const closingQuestion = /[\.!?]\s*(what do you think|drop a comment|let me know what you think|thoughts\?)\s*$/i;
-  if (closingQuestion.test(text)) {
-    patterns.push("AI-style closing engagement question");
-    score += 8;
-  }
+  // Layer C: statistical detectors
+  const stats = computeStatisticalSignals(text);
+  score += stats.score;
+  patterns.push(...stats.patterns);
+  matches.push(...stats.matches);
+  if (stats.matches.length > 0) sources.add("stats");
 
   const finalScore = Math.min(Math.round(score), 100);
-  const needsAPIConfirmation = finalScore >= 40 && finalScore <= 70;
+  const needsAPIConfirmation = finalScore >= 35 && finalScore <= 75;
 
   return {
     score: finalScore,
-    patterns: patterns.slice(0, 6),
+    patterns: patterns.slice(0, 8),
     matches,
     needsAPIConfirmation,
+    sources: Array.from(sources),
+  };
+}
+
+const COMMON_FIRST_WORDS = new Set([
+  "i", "the", "a", "an", "and", "but", "so", "we", "you", "they", "it", "this", "that",
+]);
+
+const PROPER_NOUN_STOPWORDS = new Set([
+  "I", "I'm", "I've", "LinkedIn", "The", "This", "That", "These", "Those",
+  "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday",
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+]);
+
+function computeStatisticalSignals(text: string): ScoreBundle {
+  const patterns: string[] = [];
+  const matches: PatternMatch[] = [];
+  let score = 0;
+
+  const sentences = text.split(/[.!?]+/).map((s) => s.trim()).filter((s) => s.length > 3);
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const wordCount = words.length;
+
+  // Burstiness: low sentence-length variance is an AI tell
+  if (sentences.length >= 4) {
+    const lengths = sentences.map((s) => s.split(/\s+/).length);
+    const avg = lengths.reduce((sum, n) => sum + n, 0) / lengths.length;
+    const variance = lengths.reduce((sum, n) => sum + Math.pow(n - avg, 2), 0) / lengths.length;
+    if (variance < 8 && avg < 20) {
+      patterns.push("Uniform sentence length (low burstiness)");
+      matches.push({ label: "Uniform sentence length", text: "", index: 0, weight: 15, source: "stats" });
+      score += 15;
+    } else if (variance < 4) {
+      patterns.push("Mechanical sentence rhythm");
+      matches.push({ label: "Mechanical sentence rhythm", text: "", index: 0, weight: 18, source: "stats" });
+      score += 18;
+    }
+  }
+
+  // Lexical diversity: type-token ratio over a moving window
+  if (wordCount >= 60) {
+    const lower = words.map((w) => w.toLowerCase().replace(/[^a-z']/g, "")).filter(Boolean);
+    const ttr = new Set(lower).size / Math.max(lower.length, 1);
+    if (ttr > 0.78 && wordCount < 250) {
+      // Suspiciously high diversity in short text — every word a synonym
+      patterns.push("Inflated lexical diversity (AI synonym sprawl)");
+      matches.push({ label: "Inflated lexical diversity", text: "", index: 0, weight: 10, source: "stats" });
+      score += 10;
+    }
+  }
+
+  // Proper noun density
+  const properNouns = (text.match(/\b[A-Z][a-z]{2,}\b/g) || []).filter(
+    (w) => !PROPER_NOUN_STOPWORDS.has(w),
+  );
+  const properNounDensity = properNouns.length / Math.max(wordCount, 1);
+  if (properNounDensity < 0.02 && wordCount > 50) {
+    patterns.push("Near-zero proper noun density");
+    matches.push({ label: "Near-zero proper noun density", text: "", index: 0, weight: 15, source: "stats" });
+    score += 15;
+  }
+
+  // One-sentence-per-line formatting
+  const lineBreaks = (text.match(/\n/g) || []).length;
+  const lineBreakRatio = lineBreaks / Math.max(wordCount, 1);
+  if (lineBreakRatio > 0.2 && lineBreaks > 8) {
+    patterns.push("One-sentence-per-line formatting");
+    matches.push({ label: "One-sentence-per-line formatting", text: "", index: 0, weight: 12, source: "stats" });
+    score += 12;
+  }
+
+  // Em-dash overuse
+  const emDashes = (text.match(/[—\u2014]/g) || []).length;
+  if (emDashes > 4) {
+    patterns.push("Em-dash overuse");
+    matches.push({ label: "Em-dash overuse", text: "—", index: text.indexOf("—"), weight: 10, source: "stats" });
+    score += 10;
+  } else if (emDashes > 2 && wordCount < 200) {
+    patterns.push("Em-dash density (short post)");
+    matches.push({ label: "Em-dash density", text: "—", index: text.indexOf("—"), weight: 6, source: "stats" });
+    score += 6;
+  }
+
+  // Anaphora abuse: 3+ consecutive sentences starting with same word
+  if (sentences.length >= 3) {
+    const firstWords = sentences.map((s) => s.split(/\s+/)[0]?.toLowerCase().replace(/[^a-z']/g, "") || "");
+    let runStart = 0;
+    let runWord = firstWords[0];
+    let maxRun = 1;
+    let maxRunWord = runWord;
+    for (let i = 1; i < firstWords.length; i++) {
+      if (firstWords[i] && firstWords[i] === runWord) {
+        const runLen = i - runStart + 1;
+        if (runLen > maxRun) {
+          maxRun = runLen;
+          maxRunWord = runWord;
+        }
+      } else {
+        runStart = i;
+        runWord = firstWords[i];
+      }
+    }
+    if (maxRun >= 3 && !COMMON_FIRST_WORDS.has(maxRunWord)) {
+      patterns.push(`Anaphora abuse ("${maxRunWord}" repeated ${maxRun}x)`);
+      matches.push({ label: "Anaphora abuse", text: maxRunWord, index: text.toLowerCase().indexOf(maxRunWord), weight: 14, source: "stats" });
+      score += 14;
+    } else if (maxRun >= 4) {
+      patterns.push(`Anaphora abuse ("${maxRunWord}" repeated ${maxRun}x)`);
+      matches.push({ label: "Anaphora abuse", text: maxRunWord, index: text.toLowerCase().indexOf(maxRunWord), weight: 10, source: "stats" });
+      score += 10;
+    }
+  }
+
+  // Invented concept labels: 2-3 word capitalized phrases that aren't real proper nouns
+  const conceptLabelRegex = /\b([A-Z][a-z]+ (?:of |the )?[A-Z][a-z]+(?: [A-Z][a-z]+)?)\b/g;
+  const conceptMatches: string[] = [];
+  let cm: RegExpExecArray | null;
+  while ((cm = conceptLabelRegex.exec(text)) !== null) {
+    const phrase = cm[1];
+    // Filter out obvious real proper nouns: people names, company names with common patterns
+    if (
+      !/(Inc|LLC|Corp|Ltd|GmbH|AG|SA)\.?$/.test(phrase) &&
+      !PROPER_NOUN_STOPWORDS.has(phrase.split(" ")[0]) &&
+      phrase.split(" ").every((w) => w.length >= 3)
+    ) {
+      conceptMatches.push(phrase);
+    }
+  }
+  if (conceptMatches.length >= 2) {
+    patterns.push(`Invented concept labels (${conceptMatches.slice(0, 2).join(", ")})`);
+    matches.push({
+      label: "Invented concept labels",
+      text: conceptMatches[0],
+      index: text.indexOf(conceptMatches[0]),
+      weight: 16,
+      source: "stats",
+    });
+    score += 16;
+  }
+
+  // Closing CTA question
+  const closingQuestion = /[\.!?]\s*(what do you think|drop a comment|let me know what you think|thoughts\?)\s*$/i;
+  if (closingQuestion.test(text)) {
+    patterns.push("AI-style closing engagement question");
+    matches.push({ label: "Closing engagement question", text: "", index: text.length - 1, weight: 8, source: "stats" });
+    score += 8;
+  }
+
+  // Perfect parallel structure: 3+ short clauses joined by commas with similar word count
+  const clausePattern = /(\b\w+ \w+ \w+\b)(,\s+\w+ \w+ \w+\b){2,}/;
+  if (clausePattern.test(text)) {
+    patterns.push("Tricolon / parallel structure");
+    const m = text.match(clausePattern);
+    if (m) {
+      matches.push({ label: "Parallel structure", text: m[0], index: text.indexOf(m[0]), weight: 8, source: "stats" });
+    }
+    score += 8;
+  }
+
+  return { score, patterns, matches };
+}
+
+/**
+ * Apply a local LLM judgment to an existing classification.
+ * The LLM is treated as a confidence boost (not a replacement) to keep
+ * the regex/stats patterns visible to the user. The blend leans toward
+ * the LLM only when it strongly agrees or disagrees.
+ */
+export function applyLocalLLMJudgment(
+  result: ClassificationResult,
+  llmScore: number,
+  llmReason: string,
+): ClassificationResult {
+  const blended = Math.round(result.aiScore * 0.45 + llmScore * 0.55);
+  const finalScore = Math.max(0, Math.min(100, blended));
+  const band = getConfidenceBand(finalScore);
+  const sources = new Set<DetectionSource>(result.detectionSources);
+  sources.add("local-llm");
+
+  return {
+    ...result,
+    aiScore: finalScore,
+    aiBand: band.band,
+    aiBandLabel: band.label,
+    detectionSources: Array.from(sources),
+    llmReason,
   };
 }
 
@@ -334,16 +533,20 @@ export function classifyPost(text: string): ClassificationResult {
     (a, b) => b[1].score - a[1].score
   );
   const [archetype, winner] = ranked[0];
+  const band = getConfidenceBand(aiSludge.score);
 
   return {
     archetype,
     confidence: Math.min(winner.score, 100),
     aiScore: aiSludge.score,
+    aiBand: band.band,
+    aiBandLabel: band.label,
     detectedPatterns: winner.patterns.slice(0, 4),
     aiSignals: aiSludge.patterns.slice(0, 4),
     matches: winner.matches.slice(0, 8),
     isHardEngagementFarming: isHardEngagementFarmingPost(text),
     needsApiConfirmation: aiSludge.needsAPIConfirmation,
+    detectionSources: aiSludge.sources,
   };
 }
 

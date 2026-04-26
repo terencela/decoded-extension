@@ -81,3 +81,37 @@ export function getScoreColor(score: number): string {
 export function getArchetypeLabel(archetype: Archetype): string {
   return ARCHETYPE_LABELS[archetype];
 }
+
+export type ConfidenceBand =
+  | "almost-certainly-ai"
+  | "likely-ai"
+  | "mixed-signals"
+  | "probably-human";
+
+export interface ConfidenceBandInfo {
+  band: ConfidenceBand;
+  label: string;
+  short: string;
+  color: string;
+}
+
+export function getConfidenceBand(score: number): ConfidenceBandInfo {
+  if (score >= 75) {
+    return { band: "almost-certainly-ai", label: "Almost certainly AI", short: "AI", color: "#ef4444" };
+  }
+  if (score >= 50) {
+    return { band: "likely-ai", label: "Likely AI", short: "Likely AI", color: "#f97316" };
+  }
+  if (score >= 30) {
+    return { band: "mixed-signals", label: "Mixed signals", short: "Mixed", color: "#eab308" };
+  }
+  return { band: "probably-human", label: "Probably human", short: "Human", color: "#22c55e" };
+}
+
+export type DetectionSource = "regex" | "stats" | "local-llm" | "remote-api";
+
+export interface DetectionSignal {
+  source: DetectionSource;
+  label: string;
+  weight: number;
+}

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Decoded — LinkedIn Translator",
-  "version": "1.1.0",
-  "description": "Translates corporate-speak and AI sludge on LinkedIn into plain English. Per-post AI score, behavior archetype, decode overlay.",
+  "version": "1.2.0",
+  "description": "Translates LinkedIn corporate-speak into plain English. Three-layer AI detection — regex, statistics, and on-device Gemini Nano.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://www.linkedin.com/*"],
   "background": {

@@ -4,12 +4,27 @@ import {
   UPGRADE_URL,
   getArchetypeLabel,
   getScoreColor,
+  getConfidenceBand,
   type Settings,
+  type DetectionSource,
 } from "../shared/constants";
-import { type ClassificationResult, type PatternMatch, classifyComment } from "./classifier";
+import {
+  type ClassificationResult,
+  type PatternMatch,
+  classifyComment,
+  applyLocalLLMJudgment,
+} from "./classifier";
 import { translatePost, sendFlagFeedback } from "./api";
 import { getDailyUsage, flagTranslation, hashText } from "./storage";
 import { generateShareCard, downloadShareCard, copyShareCardToClipboard } from "./shareCard";
+import { judgeWithLocalLLM, checkLocalLLMAvailability } from "./aiDetector";
+
+const SOURCE_LABELS: Record<DetectionSource, string> = {
+  regex: "regex",
+  stats: "stats",
+  "local-llm": "local AI",
+  "remote-api": "cloud AI",
+};
 
 export function extractPostText(postEl: Element): string {
   const selectors = [
@@ -90,18 +105,24 @@ export function injectAIScoreBadge(
 
   const score = result.aiScore;
   const color = getScoreColor(score);
-  const label = `${score}% AI`;
+  const band = getConfidenceBand(score);
+  const label = `${band.short} · ${score}%`;
 
   const badge = document.createElement("div");
   badge.className = inline ? "decoded-score-badge decoded-inline" : "decoded-score-badge";
   badge.setAttribute("data-score", String(score));
+  badge.setAttribute("data-band", band.band);
   badge.style.cssText = `background:${color}22;border:1px solid ${color}55;`;
   const signals = result.aiSignals.length > 0 ? result.aiSignals : result.detectedPatterns;
+  const sourceChips = result.detectionSources
+    .map((src) => `<span class="decoded-src-chip">${escapeHtml(SOURCE_LABELS[src])}</span>`)
+    .join("");
   badge.innerHTML = `
     <span class="decoded-score-dot" style="background:${color}"></span>
     <span class="decoded-score-label">${escapeHtml(label)}</span>
     <div class="decoded-score-tooltip">
-      <strong>AI Score: ${score}%</strong>
+      <strong>${escapeHtml(band.label)} · ${score}%</strong>
+      <div class="decoded-src-chips">${sourceChips}</div>
       ${signals.map((p) => `<div>• ${escapeHtml(p)}</div>`).join("")}
     </div>
   `;
@@ -112,6 +133,14 @@ export function injectAIScoreBadge(
   if (header) {
     header.appendChild(badge);
   }
+}
+
+function refreshAIScoreBadge(postEl: Element, result: ClassificationResult): void {
+  const existing = postEl.querySelector(".decoded-score-badge");
+  if (!existing) return;
+  const wasInline = existing.classList.contains("decoded-inline");
+  existing.remove();
+  injectAIScoreBadge(postEl, result, wasInline);
 }
 
 export function injectArchetypeBadge(
@@ -176,9 +205,9 @@ export async function runDecode(
       button.disabled = false;
     }
   };
-  const setLoading = () => {
+  const setLoading = (label = "Decoding…") => {
     if (button) {
-      button.innerHTML = `<span class="decoded-btn-icon" aria-hidden="true">⏳</span><span class="decoded-btn-text">Decoding…</span>`;
+      button.innerHTML = `<span class="decoded-btn-icon" aria-hidden="true">⏳</span><span class="decoded-btn-text">${escapeHtml(label)}</span>`;
       button.disabled = true;
     }
   };
@@ -198,12 +227,26 @@ export async function runDecode(
 
   setLoading();
 
+  let workingResult = result;
+  if (result.needsApiConfirmation) {
+    const availability = await checkLocalLLMAvailability();
+    if (availability.available) {
+      setLoading("Local AI…");
+      const llm = await judgeWithLocalLLM(postText);
+      if (llm.available) {
+        workingResult = applyLocalLLMJudgment(workingResult, llm.score, llm.reason);
+        refreshAIScoreBadge(postEl, workingResult);
+      }
+    }
+  }
+
+  setLoading();
   const translateResult = await translatePost(
     postText,
-    result.archetype,
-    result.detectedPatterns,
-    result.aiScore,
-    result.needsApiConfirmation
+    workingResult.archetype,
+    workingResult.detectedPatterns,
+    workingResult.aiScore,
+    workingResult.needsApiConfirmation
   );
 
   if (!translateResult.ok) {
@@ -212,7 +255,7 @@ export async function runDecode(
     return;
   }
 
-  showTranslationOverlay(postEl, translateResult.data.translation, result, postText);
+  showTranslationOverlay(postEl, translateResult.data.translation, workingResult, postText);
   setOpen();
   updateUsageDisplay();
 }
@@ -279,12 +322,22 @@ function showTranslationOverlay(
   const label = getArchetypeLabel(archetype);
   const aiScore = result.aiScore;
   const scoreColor = getScoreColor(aiScore);
+  const band = getConfidenceBand(aiScore);
 
   const overlay = document.createElement("div");
   overlay.className = "decoded-overlay";
   overlay.style.setProperty("--decoded-accent", color);
 
   const highlightedOriginal = buildHighlightedText(originalText, result.matches);
+  const sourceChips = result.detectionSources
+    .map((src) => `<span class="decoded-src-chip">${escapeHtml(SOURCE_LABELS[src])}</span>`)
+    .join("");
+
+  const aiSignalsRows = result.aiSignals.length > 0
+    ? `<div class="decoded-ai-signals">
+         ${result.aiSignals.slice(0, 5).map((s) => `<div class="decoded-ai-signal">• ${escapeHtml(s)}</div>`).join("")}
+       </div>`
+    : "";
 
   overlay.innerHTML = `
     <div class="decoded-overlay-inner">
@@ -294,10 +347,16 @@ function showTranslationOverlay(
             ${emoji} ${escapeHtml(label)}
           </span>
           <span class="decoded-badge decoded-ai-badge" style="background:${scoreColor}20;border:1px solid ${scoreColor}50;color:${scoreColor}">
-            🤖 ${aiScore}% AI
+            🤖 ${escapeHtml(band.label)} · ${aiScore}%
           </span>
         </div>
         <button class="decoded-overlay-close" type="button" title="Close" aria-label="Close">✕</button>
+      </div>
+
+      <div class="decoded-source-row">
+        <span class="decoded-source-label">Detected by</span>
+        <div class="decoded-src-chips">${sourceChips}</div>
+        ${result.llmReason ? `<span class="decoded-llm-reason" title="On-device Gemini Nano">${escapeHtml(result.llmReason)}</span>` : ""}
       </div>
 
       <div class="decoded-translation-block">
@@ -312,9 +371,16 @@ function showTranslationOverlay(
         </div>
       ` : ""}
 
+      ${aiSignalsRows ? `
+        <div class="decoded-patterns">
+          <div class="decoded-patterns-label">AI tells</div>
+          ${aiSignalsRows}
+        </div>
+      ` : ""}
+
       ${result.detectedPatterns.length > 0 ? `
         <div class="decoded-patterns">
-          <div class="decoded-patterns-label">Detected patterns</div>
+          <div class="decoded-patterns-label">Archetype patterns</div>
           <div class="decoded-patterns-list">
             ${result.detectedPatterns.map((p) => `<span class="decoded-pattern-tag">${escapeHtml(p)}</span>`).join("")}
           </div>
