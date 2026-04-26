@@ -1,3 +1,4 @@
+import { type RuntimeMessage, type Settings } from "../shared/constants";
 import { classifyPost } from "./classifier";
 import { getSettings } from "./storage";
 import {
@@ -7,9 +8,12 @@ import {
   injectArchetypeBadge,
   injectDecodeButton,
   injectCommentLabels,
+  runDecode,
 } from "./injector";
 
 let processedPosts = new WeakSet<Element>();
+let hoveredPost: Element | null = null;
+const lastResultByPost = new WeakMap<Element, { result: ReturnType<typeof classifyPost>; text: string }>();
 
 const POST_SELECTORS = [
   ".feed-shared-update-v2",
@@ -26,7 +30,7 @@ function findAllPosts(root: Element | Document = document): Element[] {
   return Array.from(found);
 }
 
-async function processPost(postEl: Element): Promise<void> {
+async function processPost(postEl: Element, settings: Settings): Promise<void> {
   if (processedPosts.has(postEl)) return;
 
   const text = extractPostText(postEl);
@@ -34,48 +38,52 @@ async function processPost(postEl: Element): Promise<void> {
 
   processedPosts.add(postEl);
 
-  const settings = await getSettings();
   if (!settings.enabled) return;
 
-  const result = classifyPost(text, postEl);
+  const result = classifyPost(text);
+  lastResultByPost.set(postEl, { result, text });
 
   if (settings.autoCollapseEngagementBait && result.isHardEngagementFarming) {
     collapseEngagementFarming(postEl);
   }
 
+  const inline = settings.inlineMode;
+
   if (settings.showAIScore) {
-    injectAIScoreBadge(postEl, result);
+    injectAIScoreBadge(postEl, result, inline);
   }
 
   if (settings.showArchetypeLabels && result.confidence > 25) {
-    injectArchetypeBadge(postEl, result);
+    injectArchetypeBadge(postEl, result, inline);
   }
 
-  postEl.addEventListener("mouseenter", () => {
-    postEl.classList.add("decoded-post-hovered");
-    injectDecodeButton(postEl, result, text);
-  });
+  if (inline) {
+    injectDecodeButton(postEl, result, text, true);
+  } else {
+    postEl.addEventListener("mouseenter", () => {
+      postEl.classList.add("decoded-post-hovered");
+      hoveredPost = postEl;
+      injectDecodeButton(postEl, result, text, false);
+    });
 
-  postEl.addEventListener("mouseleave", () => {
-    postEl.classList.remove("decoded-post-hovered");
-    if (!postEl.querySelector(".decoded-overlay")) {
-      postEl.querySelector(".decoded-btn-wrapper")?.remove();
-    }
-  });
+    postEl.addEventListener("mouseleave", () => {
+      postEl.classList.remove("decoded-post-hovered");
+      if (hoveredPost === postEl) hoveredPost = null;
+      if (!postEl.querySelector(".decoded-overlay")) {
+        postEl.querySelector(".decoded-btn-wrapper")?.remove();
+      }
+    });
+  }
 }
 
-function scanForComments(root: Document | Element = document): void {
+function scanForComments(root: Element | Document, settings: Pick<Settings, "showCommentLabels">): void {
   const commentLists = root.querySelectorAll(
     ".comments-comments-list, .feed-shared-update-v2, .comments-comment-list"
   );
-  commentLists.forEach((el) => {
-    getSettings().then((settings) => {
-      injectCommentLabels(el, settings);
-    });
-  });
+  commentLists.forEach((el) => injectCommentLabels(el, settings));
 }
 
-function initFeedObserver(): void {
+function initFeedObserver(settings: Settings): void {
   const observer = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
@@ -83,14 +91,14 @@ function initFeedObserver(): void {
 
         const posts = findAllPosts(node);
         for (const post of posts) {
-          processPost(post);
+          processPost(post, settings);
         }
 
         for (const sel of POST_SELECTORS) {
-          if (node.matches(sel)) processPost(node);
+          if (node.matches(sel)) processPost(node, settings);
         }
 
-        scanForComments(node);
+        scanForComments(node, settings);
       }
     }
   });
@@ -105,10 +113,10 @@ async function init(): Promise<void> {
   if (!settings.enabled) return;
 
   const posts = findAllPosts();
-  await Promise.all(posts.map(processPost));
+  await Promise.all(posts.map((post) => processPost(post, settings)));
 
-  scanForComments();
-  initFeedObserver();
+  scanForComments(document, settings);
+  initFeedObserver(settings);
 }
 
 if (document.readyState === "loading") {
@@ -117,13 +125,44 @@ if (document.readyState === "loading") {
   init();
 }
 
+document.addEventListener(
+  "keydown",
+  (event) => {
+    const isShortcut =
+      (event.ctrlKey || event.metaKey) && event.shiftKey && event.code === "KeyD";
+    if (!isShortcut) return;
+
+    const postUnderCursor =
+      hoveredPost ?? (event.target instanceof Element ? event.target.closest(POST_SELECTORS.join(",")) : null);
+    if (!postUnderCursor) return;
+
+    const cached = lastResultByPost.get(postUnderCursor);
+    if (!cached) return;
+
+    event.preventDefault();
+    runDecode(postUnderCursor, cached.result, cached.text);
+  },
+  true
+);
+
 chrome.runtime.onMessage.addListener((msg: unknown) => {
-  if (typeof msg === "object" && msg !== null && "type" in msg) {
-    const m = msg as { type: string };
-    if (m.type === "SETTINGS_CHANGED") {
-      document.querySelectorAll(".decoded-score-badge, .decoded-archetype-pill, .decoded-decode-btn, .decoded-overlay, .decoded-collapse-banner, .decoded-comment-label, .decoded-btn-wrapper").forEach((el) => el.remove());
-      processedPosts = new WeakSet<Element>();
-      init();
-    }
+  const m = msg as RuntimeMessage;
+  if (!m || typeof m !== "object" || !("type" in m)) return;
+
+  if (m.type === "SETTINGS_CHANGED") {
+    document
+      .querySelectorAll(
+        ".decoded-score-badge, .decoded-archetype-pill, .decoded-decode-btn, .decoded-overlay, .decoded-collapse-banner, .decoded-comment-label, .decoded-btn-wrapper"
+      )
+      .forEach((el) => el.remove());
+    processedPosts = new WeakSet<Element>();
+    init();
+    return;
+  }
+
+  if (m.type === "DECODE_HOVERED") {
+    if (!hoveredPost) return;
+    const cached = lastResultByPost.get(hoveredPost);
+    if (cached) runDecode(hoveredPost, cached.result, cached.text);
   }
 });

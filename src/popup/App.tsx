@@ -1,35 +1,21 @@
 import { useState, useEffect, useCallback } from "react";
-
-interface Settings {
-  enabled: boolean;
-  showAIScore: boolean;
-  autoCollapseEngagementBait: boolean;
-  showCommentLabels: boolean;
-  showArchetypeLabels: boolean;
-  apiUrl: string;
-}
-
-interface Usage {
-  count: number;
-  limit: number;
-}
-
-const DEFAULT_SETTINGS: Settings = {
-  enabled: true,
-  showAIScore: true,
-  autoCollapseEngagementBait: true,
-  showCommentLabels: true,
-  showArchetypeLabels: true,
-  apiUrl: "https://decoded-api.replit.app/api",
-};
+import {
+  DEFAULT_SETTINGS,
+  FREE_DAILY_LIMIT,
+  UPGRADE_URL,
+  type Settings,
+  type UsageResponse,
+} from "../shared/constants";
 
 function Toggle({
   label,
+  ariaLabel,
   value,
   onChange,
   sublabel,
 }: {
   label: string;
+  ariaLabel?: string;
   value: boolean;
   onChange: (v: boolean) => void;
   sublabel?: string;
@@ -41,12 +27,19 @@ function Toggle({
         {sublabel && <div style={styles.toggleSub}>{sublabel}</div>}
       </div>
       <button
+        type="button"
         style={{ ...styles.toggle, ...(value ? styles.toggleOn : styles.toggleOff) }}
         onClick={() => onChange(!value)}
         role="switch"
         aria-checked={value}
+        aria-label={ariaLabel || label || "Toggle"}
       >
-        <div style={{ ...styles.toggleThumb, transform: value ? "translateX(20px)" : "translateX(2px)" }} />
+        <div
+          style={{
+            ...styles.toggleThumb,
+            transform: value ? "translateX(20px)" : "translateX(2px)",
+          }}
+        />
       </button>
     </div>
   );
@@ -54,39 +47,40 @@ function Toggle({
 
 export default function App() {
   const [settings, setSettings] = useState<Settings>(DEFAULT_SETTINGS);
-  const [usage, setUsage] = useState<Usage>({ count: 0, limit: 5 });
+  const [usage, setUsage] = useState<UsageResponse>({ count: 0, limit: FREE_DAILY_LIMIT });
   const [showApiInput, setShowApiInput] = useState(false);
   const [apiUrlInput, setApiUrlInput] = useState("");
   const [saved, setSaved] = useState(false);
 
   useEffect(() => {
     chrome.storage.local.get(["settings", "usage"], (result) => {
-      if (result.settings) {
-        setSettings({ ...DEFAULT_SETTINGS, ...result.settings });
-        setApiUrlInput(result.settings.apiUrl || DEFAULT_SETTINGS.apiUrl);
-      } else {
-        setApiUrlInput(DEFAULT_SETTINGS.apiUrl);
-      }
+      const merged = { ...DEFAULT_SETTINGS, ...(result.settings || {}) };
+      setSettings(merged);
+      setApiUrlInput(merged.apiUrl);
 
       const today = new Date().toISOString().split("T")[0];
-      const u = result.usage;
+      const u = result.usage as { count: number; date: string } | undefined;
       if (u && u.date === today) {
-        setUsage({ count: u.count, limit: 5 });
+        setUsage({ count: u.count, limit: FREE_DAILY_LIMIT });
       }
     });
   }, []);
 
-  const updateSetting = useCallback(<K extends keyof Settings>(key: K, value: Settings[K]) => {
-    const updated = { ...settings, [key]: value };
-    setSettings(updated);
-    chrome.storage.local.set({ settings: updated }, () => {
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        if (tabs[0]?.id) {
-          chrome.tabs.sendMessage(tabs[0].id, { type: "SETTINGS_CHANGED" }).catch(() => {});
-        }
+  const updateSetting = useCallback(
+    <K extends keyof Settings>(key: K, value: Settings[K]) => {
+      const updated = { ...settings, [key]: value };
+      setSettings(updated);
+      chrome.storage.local.set({ settings: updated }, () => {
+        chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+          const tabId = tabs[0]?.id;
+          if (typeof tabId === "number") {
+            chrome.tabs.sendMessage(tabId, { type: "SETTINGS_CHANGED" }).catch(() => {});
+          }
+        });
       });
-    });
-  }, [settings]);
+    },
+    [settings]
+  );
 
   const saveApiUrl = () => {
     updateSetting("apiUrl", apiUrlInput.trim() || DEFAULT_SETTINGS.apiUrl);
@@ -94,20 +88,25 @@ export default function App() {
     setTimeout(() => setSaved(false), 2000);
   };
 
-  const usagePercent = Math.round((usage.count / usage.limit) * 100);
-  const remaining = usage.limit - usage.count;
+  const usagePercent = Math.min(100, Math.round((usage.count / Math.max(usage.limit, 1)) * 100));
+  const remaining = Math.max(0, usage.limit - usage.count);
 
   return (
     <div style={styles.container}>
       <div style={styles.header}>
         <div style={styles.logo}>
-          <span style={styles.logoIcon}>🔍</span>
+          <span style={styles.logoIcon} aria-hidden="true">🔍</span>
           <div>
             <div style={styles.logoName}>Decoded</div>
-            <div style={styles.logoTagline}>LinkedIn Translator</div>
+            <div style={styles.logoTagline}>BS translator for LinkedIn</div>
           </div>
         </div>
-        <Toggle label="" value={settings.enabled} onChange={(v) => updateSetting("enabled", v)} />
+        <Toggle
+          label=""
+          ariaLabel="Enable Decoded"
+          value={settings.enabled}
+          onChange={(v) => updateSetting("enabled", v)}
+        />
       </div>
 
       <div style={styles.usageSection}>
@@ -117,51 +116,55 @@ export default function App() {
             {usage.count} / {usage.limit}
           </span>
         </div>
-        <div style={styles.usageBar}>
+        <div style={styles.usageBar} aria-hidden="true">
           <div
             style={{
               ...styles.usageFill,
               width: `${usagePercent}%`,
-              background: usagePercent >= 100 ? "#ef4444" : usagePercent >= 80 ? "#f97316" : "#4f6ef7",
+              background:
+                usagePercent >= 100 ? "#ef4444" : usagePercent >= 80 ? "#f97316" : "#4f6ef7",
             }}
           />
         </div>
         {remaining <= 0 ? (
           <div style={styles.usageFull}>
             Daily limit reached.{" "}
-            <a
-              href="https://decoded.app/upgrade"
-              target="_blank"
-              rel="noopener"
-              style={styles.upgradeLink}
-            >
+            <a href={UPGRADE_URL} target="_blank" rel="noopener" style={styles.upgradeLink}>
               Upgrade to Pro
             </a>
           </div>
         ) : (
-          <div style={styles.usageRemaining}>{remaining} free decode{remaining !== 1 ? "s" : ""} remaining today</div>
+          <div style={styles.usageRemaining}>
+            {remaining} free decode{remaining !== 1 ? "s" : ""} remaining today
+          </div>
         )}
       </div>
 
       <div style={styles.section}>
-        <div style={styles.sectionTitle}>Settings</div>
+        <div style={styles.sectionTitle}>Display</div>
+        <Toggle
+          label="Always-on inline mode"
+          value={settings.inlineMode}
+          onChange={(v) => updateSetting("inlineMode", v)}
+          sublabel="Show badges & decode button without hover"
+        />
         <Toggle
           label="AI score badge"
           value={settings.showAIScore}
           onChange={(v) => updateSetting("showAIScore", v)}
-          sublabel="Show AI% badge on posts on hover"
+          sublabel="Show AI% badge on each post"
         />
         <Toggle
           label="Archetype labels"
           value={settings.showArchetypeLabels}
           onChange={(v) => updateSetting("showArchetypeLabels", v)}
-          sublabel="Show behavior type label on posts"
+          sublabel="Tag each post with its behavior type"
         />
         <Toggle
           label="Auto-collapse engagement bait"
           value={settings.autoCollapseEngagementBait}
           onChange={(v) => updateSetting("autoCollapseEngagementBait", v)}
-          sublabel="Collapse hard farming posts automatically"
+          sublabel="Hide hard farming posts behind a banner"
         />
         <Toggle
           label="Comment labels"
@@ -172,43 +175,51 @@ export default function App() {
       </div>
 
       <div style={styles.section}>
-        <button style={styles.advancedBtn} onClick={() => setShowApiInput(!showApiInput)}>
+        <div style={styles.shortcutRow}>
+          <span style={styles.shortcutLabel}>Decode hovered post</span>
+          <kbd style={styles.kbd}>Ctrl/⌘ + Shift + D</kbd>
+        </div>
+      </div>
+
+      <div style={styles.section}>
+        <button
+          type="button"
+          style={styles.advancedBtn}
+          onClick={() => setShowApiInput(!showApiInput)}
+          aria-expanded={showApiInput}
+        >
           {showApiInput ? "▲" : "▼"} Advanced settings
         </button>
         {showApiInput && (
           <div style={styles.apiSection}>
-            <label style={styles.apiLabel}>API endpoint</label>
+            <label style={styles.apiLabel} htmlFor="decoded-api-url">
+              API endpoint
+            </label>
             <div style={styles.apiRow}>
               <input
+                id="decoded-api-url"
                 style={styles.apiInput}
                 value={apiUrlInput}
                 onChange={(e) => setApiUrlInput(e.target.value)}
                 placeholder="https://your-api.domain/api"
               />
-              <button style={styles.apiSave} onClick={saveApiUrl}>
+              <button type="button" style={styles.apiSave} onClick={saveApiUrl}>
                 {saved ? "✓" : "Save"}
               </button>
             </div>
-            <div style={styles.apiHint}>
-              Self-host the Decoded API and enter your URL here.
-            </div>
+            <div style={styles.apiHint}>Self-host the Decoded API and enter your URL here.</div>
           </div>
         )}
       </div>
 
       <div style={styles.footer}>
-        <a
-          href="https://decoded.app/upgrade"
-          target="_blank"
-          rel="noopener"
-          style={styles.proBanner}
-        >
-          <span style={styles.proBannerIcon}>⚡</span>
+        <a href={UPGRADE_URL} target="_blank" rel="noopener" style={styles.proBanner}>
+          <span style={styles.proBannerIcon} aria-hidden="true">⚡</span>
           <div>
-            <div style={styles.proBannerTitle}>Upgrade to Pro — $3/mo</div>
-            <div style={styles.proBannerSub}>Unlimited decodes · No watermarks · Priority access</div>
+            <div style={styles.proBannerTitle}>Upgrade to Pro · $3/mo</div>
+            <div style={styles.proBannerSub}>Unlimited decodes · No watermark · Priority access</div>
           </div>
-          <span style={styles.proBannerArrow}>→</span>
+          <span style={styles.proBannerArrow} aria-hidden="true">→</span>
         </a>
       </div>
     </div>
@@ -256,8 +267,8 @@ const styles: Record<string, React.CSSProperties> = {
     position: "relative",
     padding: "0",
     transition: "background 0.15s",
-    flexShrink: "0",
-  } as React.CSSProperties,
+    flexShrink: 0,
+  },
   toggleOn: {
     background: "#4f6ef7",
   },
@@ -273,7 +284,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#fff",
     transition: "transform 0.15s",
     boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
-  } as React.CSSProperties,
+  },
   usageSection: {
     padding: "12px 16px",
     borderBottom: "1px solid #1e1e2e",
@@ -287,12 +298,12 @@ const styles: Record<string, React.CSSProperties> = {
   usageTitle: {
     fontSize: "12px",
     color: "#888",
-    fontWeight: "500",
+    fontWeight: 500,
   },
   usageCount: {
     fontSize: "12px",
     color: "#bbb",
-    fontWeight: "600",
+    fontWeight: 600,
   },
   usageBar: {
     height: "4px",
@@ -317,7 +328,7 @@ const styles: Record<string, React.CSSProperties> = {
   upgradeLink: {
     color: "#7b9dff",
     textDecoration: "none",
-    fontWeight: "600",
+    fontWeight: 600,
   },
   section: {
     padding: "10px 16px",
@@ -325,7 +336,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   sectionTitle: {
     fontSize: "10px",
-    fontWeight: "700",
+    fontWeight: 700,
     letterSpacing: "0.08em",
     color: "#555",
     textTransform: "uppercase",
@@ -339,17 +350,36 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "12px",
   },
   toggleInfo: {
-    flex: "1",
+    flex: 1,
   },
   toggleLabel: {
     fontSize: "13px",
     color: "#ddd",
-    fontWeight: "500",
+    fontWeight: 500,
   },
   toggleSub: {
     fontSize: "11px",
     color: "#666",
     marginTop: "1px",
+  },
+  shortcutRow: {
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+  },
+  shortcutLabel: {
+    fontSize: "12px",
+    color: "#888",
+  },
+  kbd: {
+    display: "inline-block",
+    padding: "3px 8px",
+    background: "#1a1a28",
+    border: "1px solid #333",
+    borderRadius: "4px",
+    fontSize: "11px",
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    color: "#bbb",
   },
   advancedBtn: {
     background: "transparent",
@@ -374,7 +404,7 @@ const styles: Record<string, React.CSSProperties> = {
     gap: "6px",
   },
   apiInput: {
-    flex: "1",
+    flex: 1,
     background: "#1a1a28",
     border: "1px solid #333",
     borderRadius: "6px",
@@ -391,7 +421,7 @@ const styles: Record<string, React.CSSProperties> = {
     padding: "6px 12px",
     color: "#fff",
     fontSize: "12px",
-    fontWeight: "600",
+    fontWeight: 600,
     cursor: "pointer",
     fontFamily: "inherit",
   },
@@ -416,11 +446,11 @@ const styles: Record<string, React.CSSProperties> = {
   },
   proBannerIcon: {
     fontSize: "18px",
-    flexShrink: "0",
+    flexShrink: 0,
   },
   proBannerTitle: {
     fontSize: "13px",
-    fontWeight: "700",
+    fontWeight: 700,
     color: "#7b9dff",
     lineHeight: "1.2",
   },
@@ -433,6 +463,6 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#4f6ef7",
     fontSize: "16px",
     marginLeft: "auto",
-    flexShrink: "0",
+    flexShrink: 0,
   },
 };

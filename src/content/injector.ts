@@ -1,23 +1,15 @@
-import { type ClassificationResult, type Archetype, getArchetypeLabel, classifyComment } from "./classifier";
-import { translatePost } from "./api";
-import { getDailyUsage, FREE_DAILY_LIMIT } from "./storage";
+import {
+  ARCHETYPE_COLORS,
+  ARCHETYPE_EMOJIS,
+  UPGRADE_URL,
+  getArchetypeLabel,
+  getScoreColor,
+  type Settings,
+} from "../shared/constants";
+import { type ClassificationResult, type PatternMatch, classifyComment } from "./classifier";
+import { translatePost, sendFlagFeedback } from "./api";
+import { getDailyUsage, flagTranslation, hashText } from "./storage";
 import { generateShareCard, downloadShareCard, copyShareCardToClipboard } from "./shareCard";
-
-const ARCHETYPE_COLORS: Record<Archetype, string> = {
-  "failure-laundering": "#ef4444",
-  "engagement-farming": "#f97316",
-  "status-packaging": "#a855f7",
-  "ai-sludge": "#3b82f6",
-  "consensus-wisdom": "#6b7280",
-};
-
-const ARCHETYPE_EMOJIS: Record<Archetype, string> = {
-  "failure-laundering": "🪣",
-  "engagement-farming": "🎣",
-  "status-packaging": "📦",
-  "ai-sludge": "🤖",
-  "consensus-wisdom": "🧘",
-};
 
 export function extractPostText(postEl: Element): string {
   const selectors = [
@@ -75,9 +67,9 @@ export function collapseEngagementFarming(postEl: Element): void {
       const banner = document.createElement("div");
       banner.className = "decoded-collapse-banner";
       banner.innerHTML = `
-        <span class="decoded-collapse-icon">🎣</span>
+        <span class="decoded-collapse-icon">${ARCHETYPE_EMOJIS["engagement-farming"]}</span>
         <span class="decoded-collapse-text">Engagement bait detected.</span>
-        <button class="decoded-show-anyway">Show anyway</button>
+        <button class="decoded-show-anyway" type="button">Show anyway</button>
       `;
       banner.querySelector(".decoded-show-anyway")!.addEventListener("click", () => {
         content.style.display = "";
@@ -89,24 +81,28 @@ export function collapseEngagementFarming(postEl: Element): void {
   }
 }
 
-export function injectAIScoreBadge(postEl: Element, result: ClassificationResult): void {
+export function injectAIScoreBadge(
+  postEl: Element,
+  result: ClassificationResult,
+  inline = false
+): void {
   if (postEl.querySelector(".decoded-score-badge")) return;
 
   const score = result.aiScore;
-  const color = score > 70 ? "#ef4444" : score > 35 ? "#f97316" : "#22c55e";
+  const color = getScoreColor(score);
   const label = `${score}% AI`;
 
   const badge = document.createElement("div");
-  badge.className = "decoded-score-badge";
+  badge.className = inline ? "decoded-score-badge decoded-inline" : "decoded-score-badge";
   badge.setAttribute("data-score", String(score));
   badge.style.cssText = `background:${color}22;border:1px solid ${color}55;`;
   const signals = result.aiSignals.length > 0 ? result.aiSignals : result.detectedPatterns;
   badge.innerHTML = `
     <span class="decoded-score-dot" style="background:${color}"></span>
-    <span class="decoded-score-label">${label}</span>
+    <span class="decoded-score-label">${escapeHtml(label)}</span>
     <div class="decoded-score-tooltip">
       <strong>AI Score: ${score}%</strong>
-      ${signals.map((p) => `<div>• ${p}</div>`).join("")}
+      ${signals.map((p) => `<div>• ${escapeHtml(p)}</div>`).join("")}
     </div>
   `;
 
@@ -118,7 +114,11 @@ export function injectAIScoreBadge(postEl: Element, result: ClassificationResult
   }
 }
 
-export function injectArchetypeBadge(postEl: Element, result: ClassificationResult): void {
+export function injectArchetypeBadge(
+  postEl: Element,
+  result: ClassificationResult,
+  inline = false
+): void {
   if (postEl.querySelector(".decoded-archetype-pill")) return;
 
   const archetype = result.archetype;
@@ -127,9 +127,9 @@ export function injectArchetypeBadge(postEl: Element, result: ClassificationResu
   const label = getArchetypeLabel(archetype);
 
   const pill = document.createElement("div");
-  pill.className = "decoded-archetype-pill";
+  pill.className = inline ? "decoded-archetype-pill decoded-inline" : "decoded-archetype-pill";
   pill.style.cssText = `background:${color}15;border:1px solid ${color}40;`;
-  pill.innerHTML = `<span>${emoji}</span><span class="decoded-pill-label" style="color:${color}">${label}</span>`;
+  pill.innerHTML = `<span>${emoji}</span><span class="decoded-pill-label" style="color:${color}">${escapeHtml(label)}</span>`;
 
   const actionBar = getActionBar(postEl);
   if (actionBar) {
@@ -140,56 +140,81 @@ export function injectArchetypeBadge(postEl: Element, result: ClassificationResu
 export function injectDecodeButton(
   postEl: Element,
   result: ClassificationResult,
-  postText: string
+  postText: string,
+  inline = false
 ): void {
   if (postEl.querySelector(".decoded-decode-btn")) return;
 
   const btn = document.createElement("button");
-  btn.className = "decoded-decode-btn";
-  btn.title = "Decode this post with Decoded";
-  btn.innerHTML = `<span class="decoded-btn-icon">🔍</span><span class="decoded-btn-text">Decode</span>`;
+  btn.type = "button";
+  btn.className = inline ? "decoded-decode-btn decoded-inline" : "decoded-decode-btn";
+  btn.title = "Decode this post (Ctrl+Shift+D)";
+  btn.setAttribute("aria-label", "Decode this post");
+  btn.innerHTML = `<span class="decoded-btn-icon" aria-hidden="true">🔍</span><span class="decoded-btn-text">Decode</span>`;
 
-  btn.addEventListener("click", async () => {
-    btn.innerHTML = `<span class="decoded-btn-icon">⏳</span><span class="decoded-btn-text">Decoding…</span>`;
-    btn.disabled = true;
-
-    const existingOverlay = postEl.querySelector(".decoded-overlay");
-    if (existingOverlay) {
-      existingOverlay.remove();
-      btn.innerHTML = `<span class="decoded-btn-icon">🔍</span><span class="decoded-btn-text">Decode</span>`;
-      btn.disabled = false;
-      return;
-    }
-
-    const translateResult = await translatePost(
-      postText,
-      result.archetype,
-      result.detectedPatterns,
-      result.aiScore,
-      result.needsApiConfirmation
-    );
-
-    if (!translateResult.ok) {
-      showError(postEl, translateResult.error.message, result);
-      btn.innerHTML = `<span class="decoded-btn-icon">🔍</span><span class="decoded-btn-text">Decode</span>`;
-      btn.disabled = false;
-      return;
-    }
-
-    showTranslationOverlay(postEl, translateResult.data.translation, result, postText);
-    btn.innerHTML = `<span class="decoded-btn-icon">✕</span><span class="decoded-btn-text">Close</span>`;
-    btn.disabled = false;
-
-    updateUsageDisplay();
-  });
+  btn.addEventListener("click", () => runDecode(postEl, result, postText, btn));
 
   const actionBar = getActionBar(postEl);
   if (actionBar) {
     const wrapper = document.createElement("div");
-    wrapper.className = "decoded-btn-wrapper";
+    wrapper.className = inline ? "decoded-btn-wrapper decoded-inline" : "decoded-btn-wrapper";
     wrapper.appendChild(btn);
     actionBar.appendChild(wrapper);
   }
+}
+
+export async function runDecode(
+  postEl: Element,
+  result: ClassificationResult,
+  postText: string,
+  btn?: HTMLButtonElement | null
+): Promise<void> {
+  const button = btn ?? (postEl.querySelector(".decoded-decode-btn") as HTMLButtonElement | null);
+  const setIdle = () => {
+    if (button) {
+      button.innerHTML = `<span class="decoded-btn-icon" aria-hidden="true">🔍</span><span class="decoded-btn-text">Decode</span>`;
+      button.disabled = false;
+    }
+  };
+  const setLoading = () => {
+    if (button) {
+      button.innerHTML = `<span class="decoded-btn-icon" aria-hidden="true">⏳</span><span class="decoded-btn-text">Decoding…</span>`;
+      button.disabled = true;
+    }
+  };
+  const setOpen = () => {
+    if (button) {
+      button.innerHTML = `<span class="decoded-btn-icon" aria-hidden="true">✕</span><span class="decoded-btn-text">Close</span>`;
+      button.disabled = false;
+    }
+  };
+
+  const existingOverlay = postEl.querySelector(".decoded-overlay");
+  if (existingOverlay) {
+    existingOverlay.remove();
+    setIdle();
+    return;
+  }
+
+  setLoading();
+
+  const translateResult = await translatePost(
+    postText,
+    result.archetype,
+    result.detectedPatterns,
+    result.aiScore,
+    result.needsApiConfirmation
+  );
+
+  if (!translateResult.ok) {
+    showError(postEl, translateResult.error.message);
+    setIdle();
+    return;
+  }
+
+  showTranslationOverlay(postEl, translateResult.data.translation, result, postText);
+  setOpen();
+  updateUsageDisplay();
 }
 
 async function updateUsageDisplay(): Promise<void> {
@@ -197,27 +222,46 @@ async function updateUsageDisplay(): Promise<void> {
   chrome.runtime.sendMessage({ type: "USAGE_UPDATED", count: usage.count });
 }
 
-function showError(postEl: Element, message: string, result: ClassificationResult): void {
+function showError(postEl: Element, message: string): void {
   const existing = postEl.querySelector(".decoded-overlay");
   if (existing) existing.remove();
 
   const overlay = document.createElement("div");
   overlay.className = "decoded-overlay decoded-overlay--error";
+  const showUpgrade = message.includes("upgrade") || message.includes("free decode");
   overlay.innerHTML = `
     <div class="decoded-overlay-inner">
-      <div class="decoded-error-msg">${message}</div>
-      ${
-        message.includes("upgrade") || message.includes("free decode")
-          ? `<a href="https://decoded.app/upgrade" target="_blank" class="decoded-upgrade-link">Upgrade to Pro — $3/mo</a>`
-          : ""
-      }
-      <button class="decoded-overlay-close">✕ Close</button>
+      <div class="decoded-error-msg">${escapeHtml(message)}</div>
+      ${showUpgrade ? `<a href="${UPGRADE_URL}" target="_blank" rel="noopener" class="decoded-upgrade-link">Upgrade to Pro — $3/mo</a>` : ""}
+      <button class="decoded-overlay-close" type="button" aria-label="Close">✕ Close</button>
     </div>
   `;
   overlay.querySelector(".decoded-overlay-close")!.addEventListener("click", () => overlay.remove());
 
   const actionBar = getActionBar(postEl);
   actionBar?.parentNode?.insertBefore(overlay, actionBar);
+}
+
+function buildHighlightedText(text: string, matches: PatternMatch[], maxLen = 600): string {
+  const truncated = text.length > maxLen ? text.slice(0, maxLen).trimEnd() + "…" : text;
+  if (matches.length === 0) return escapeHtml(truncated);
+
+  const inRange = matches
+    .filter((m) => m.index >= 0 && m.index < truncated.length)
+    .sort((a, b) => a.index - b.index);
+
+  let html = "";
+  let cursor = 0;
+  for (const match of inRange) {
+    const end = Math.min(match.index + match.text.length, truncated.length);
+    if (match.index < cursor) continue;
+    html += escapeHtml(truncated.slice(cursor, match.index));
+    const slice = truncated.slice(match.index, end);
+    html += `<mark class="decoded-mark" data-label="${escapeHtml(match.label)}" title="${escapeHtml(match.label)}">${escapeHtml(slice)}</mark>`;
+    cursor = end;
+  }
+  html += escapeHtml(truncated.slice(cursor));
+  return html;
 }
 
 function showTranslationOverlay(
@@ -234,24 +278,26 @@ function showTranslationOverlay(
   const emoji = ARCHETYPE_EMOJIS[archetype];
   const label = getArchetypeLabel(archetype);
   const aiScore = result.aiScore;
-  const scoreColor = aiScore > 70 ? "#ef4444" : aiScore > 35 ? "#f97316" : "#22c55e";
+  const scoreColor = getScoreColor(aiScore);
 
   const overlay = document.createElement("div");
   overlay.className = "decoded-overlay";
   overlay.style.setProperty("--decoded-accent", color);
+
+  const highlightedOriginal = buildHighlightedText(originalText, result.matches);
 
   overlay.innerHTML = `
     <div class="decoded-overlay-inner">
       <div class="decoded-overlay-header">
         <div class="decoded-overlay-badges">
           <span class="decoded-badge" style="background:${color}20;border:1px solid ${color}50;color:${color}">
-            ${emoji} ${label}
+            ${emoji} ${escapeHtml(label)}
           </span>
           <span class="decoded-badge decoded-ai-badge" style="background:${scoreColor}20;border:1px solid ${scoreColor}50;color:${scoreColor}">
             🤖 ${aiScore}% AI
           </span>
         </div>
-        <button class="decoded-overlay-close" title="Close">✕</button>
+        <button class="decoded-overlay-close" type="button" title="Close" aria-label="Close">✕</button>
       </div>
 
       <div class="decoded-translation-block">
@@ -259,26 +305,29 @@ function showTranslationOverlay(
         <div class="decoded-translation-text">${escapeHtml(translation)}</div>
       </div>
 
-      ${
-        result.detectedPatterns.length > 0
-          ? `<div class="decoded-patterns">
+      ${result.matches.length > 0 ? `
+        <div class="decoded-highlight-block">
+          <div class="decoded-translation-label">Highlighted phrases (hover for tag)</div>
+          <div class="decoded-highlight-text">${highlightedOriginal}</div>
+        </div>
+      ` : ""}
+
+      ${result.detectedPatterns.length > 0 ? `
+        <div class="decoded-patterns">
           <div class="decoded-patterns-label">Detected patterns</div>
           <div class="decoded-patterns-list">
             ${result.detectedPatterns.map((p) => `<span class="decoded-pattern-tag">${escapeHtml(p)}</span>`).join("")}
           </div>
-        </div>`
-          : ""
-      }
+        </div>
+      ` : ""}
 
       <div class="decoded-overlay-actions">
-        <button class="decoded-share-btn" data-action="share">📤 Share card</button>
-        <button class="decoded-copy-btn" data-action="copy">📋 Copy image</button>
-        <button class="decoded-flag-btn" data-action="flag">🚩 Flag translation</button>
+        <button class="decoded-share-btn" type="button" data-action="share">📤 Share card</button>
+        <button class="decoded-copy-btn" type="button" data-action="copy">📋 Copy image</button>
+        <button class="decoded-flag-btn" type="button" data-action="flag">🚩 Flag translation</button>
       </div>
 
-      <div class="decoded-share-note" style="display:none">
-        Generating 1200×630 share card…
-      </div>
+      <div class="decoded-share-note" hidden></div>
     </div>
   `;
 
@@ -286,53 +335,49 @@ function showTranslationOverlay(
     overlay.remove();
     const btn = postEl.querySelector(".decoded-decode-btn") as HTMLButtonElement | null;
     if (btn) {
-      btn.innerHTML = `<span class="decoded-btn-icon">🔍</span><span class="decoded-btn-text">Decode</span>`;
+      btn.innerHTML = `<span class="decoded-btn-icon" aria-hidden="true">🔍</span><span class="decoded-btn-text">Decode</span>`;
       btn.disabled = false;
     }
   });
 
   const shareNote = overlay.querySelector(".decoded-share-note") as HTMLElement;
+  const flashNote = (msg: string, ms = 3000) => {
+    shareNote.hidden = false;
+    shareNote.textContent = msg;
+    window.setTimeout(() => {
+      shareNote.hidden = true;
+    }, ms);
+  };
 
   overlay.querySelector('[data-action="share"]')!.addEventListener("click", async () => {
-    shareNote.style.display = "block";
-    shareNote.textContent = "Generating share card…";
+    flashNote("Generating share card…", 8000);
     try {
-      const blob = await generateShareCard(
-        originalText.slice(0, 280),
-        translation,
-        archetype,
-        aiScore
-      );
+      const blob = await generateShareCard(originalText.slice(0, 280), translation, archetype, aiScore);
       await downloadShareCard(blob);
-      shareNote.textContent = "Share card downloaded! 🎉";
+      flashNote("Share card downloaded.");
     } catch {
-      shareNote.textContent = "Failed to generate card.";
+      flashNote("Failed to generate card.");
     }
-    setTimeout(() => (shareNote.style.display = "none"), 3000);
   });
 
   overlay.querySelector('[data-action="copy"]')!.addEventListener("click", async () => {
-    shareNote.style.display = "block";
-    shareNote.textContent = "Copying to clipboard…";
+    flashNote("Copying to clipboard…", 8000);
     try {
-      const blob = await generateShareCard(
-        originalText.slice(0, 280),
-        translation,
-        archetype,
-        aiScore
-      );
+      const blob = await generateShareCard(originalText.slice(0, 280), translation, archetype, aiScore);
       const success = await copyShareCardToClipboard(blob);
-      shareNote.textContent = success ? "Copied! Paste into X or Stories 🎉" : "Could not copy. Try Download instead.";
+      flashNote(success ? "Copied. Paste into X or Stories." : "Could not copy. Try Download instead.");
     } catch {
-      shareNote.textContent = "Failed to copy.";
+      flashNote("Failed to copy.");
     }
-    setTimeout(() => (shareNote.style.display = "none"), 3000);
   });
 
-  overlay.querySelector('[data-action="flag"]')!.addEventListener("click", () => {
-    shareNote.style.display = "block";
-    shareNote.textContent = "Thanks for flagging. We'll review this translation.";
-    setTimeout(() => (shareNote.style.display = "none"), 3000);
+  overlay.querySelector('[data-action="flag"]')!.addEventListener("click", async () => {
+    const flagBtn = overlay.querySelector('[data-action="flag"]') as HTMLButtonElement;
+    flagBtn.disabled = true;
+    const hash = hashText(originalText);
+    await flagTranslation({ hash, text: originalText.slice(0, 500), translation, archetype });
+    void sendFlagFeedback({ hash, archetype });
+    flashNote("Thanks. Stored locally and synced when API is reachable.");
   });
 
   const actionBar = getActionBar(postEl);
@@ -343,7 +388,10 @@ function showTranslationOverlay(
   }
 }
 
-export function injectCommentLabels(postEl: Element, settings: { showCommentLabels: boolean }): void {
+export function injectCommentLabels(
+  postEl: Element,
+  settings: Pick<Settings, "showCommentLabels">
+): void {
   if (!settings.showCommentLabels) return;
 
   const commentSelectors = [
@@ -366,10 +414,10 @@ export function injectCommentLabels(postEl: Element, settings: { showCommentLabe
       const label = document.createElement("div");
       label.className = "decoded-comment-label";
       label.innerHTML = `
-        <span class="decoded-comment-icon">🤖</span>
+        <span class="decoded-comment-icon" aria-hidden="true">🤖</span>
         <span class="decoded-comment-text">
-          <strong>${archetypeEmoji} ${result.archetypeLabel}</strong> • AI comment (${result.confidence}%)
-          ${result.patterns.length > 0 ? `<span class="decoded-comment-patterns">${result.patterns.slice(0, 2).join(", ")}</span>` : ""}
+          <strong>${archetypeEmoji} ${escapeHtml(result.archetypeLabel)}</strong> · AI comment (${result.confidence}%)
+          ${result.patterns.length > 0 ? `<span class="decoded-comment-patterns">${escapeHtml(result.patterns.slice(0, 2).join(", "))}</span>` : ""}
         </span>
       `;
       commentEl.appendChild(label);
@@ -377,10 +425,13 @@ export function injectCommentLabels(postEl: Element, settings: { showCommentLabe
   }
 }
 
-function escapeHtml(text: string): string {
-  return text
+export function escapeHtml(text: string): string {
+  return String(text)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;")
+    .replace(/`/g, "&#96;")
+    .replace(/\//g, "&#47;");
 }

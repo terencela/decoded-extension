@@ -1,12 +1,4 @@
-import { type Archetype, getArchetypeLabel } from "./classifier";
-
-const ARCHETYPE_COLORS: Record<Archetype, string> = {
-  "failure-laundering": "#ef4444",
-  "engagement-farming": "#f97316",
-  "status-packaging": "#a855f7",
-  "ai-sludge": "#3b82f6",
-  "consensus-wisdom": "#6b7280",
-};
+import { ARCHETYPE_COLORS, getArchetypeLabel, getScoreColor, type Archetype } from "../shared/constants";
 
 function wrapText(
   ctx: CanvasRenderingContext2D,
@@ -103,7 +95,7 @@ export async function generateShareCard(
   const scoreBadgeX = badgeX + badgeW + 12;
   ctx.font = "bold 15px -apple-system, system-ui, sans-serif";
   const scoreW = ctx.measureText(scoreLabel).width + 28;
-  ctx.fillStyle = aiScore > 70 ? "#ef4444" : aiScore > 35 ? "#f97316" : "#22c55e";
+  ctx.fillStyle = getScoreColor(aiScore);
   roundRect(ctx, scoreBadgeX, badgeY, scoreW, badgeH, 8);
   ctx.fill();
   ctx.fillStyle = "#ffffff";

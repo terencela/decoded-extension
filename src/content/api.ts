@@ -1,5 +1,13 @@
-import { type Archetype } from "./classifier";
-import { getSettings, canDecode, incrementDailyUsage, getCachedResult, setCachedResult, hashText, FREE_DAILY_LIMIT } from "./storage";
+import { type Archetype } from "../shared/constants";
+import { ARCHETYPES, FREE_DAILY_LIMIT } from "../shared/constants";
+import {
+  getSettings,
+  canDecode,
+  incrementDailyUsage,
+  getCachedResult,
+  setCachedResult,
+  hashText,
+} from "./storage";
 
 export interface TranslateResponse {
   translation: string;
@@ -13,7 +21,9 @@ export interface TranslateError {
   message: string;
 }
 
-export type TranslateResult = { ok: true; data: TranslateResponse } | { ok: false; error: TranslateError };
+export type TranslateResult =
+  | { ok: true; data: TranslateResponse }
+  | { ok: false; error: TranslateError };
 
 async function classifyWithAPI(
   text: string,
@@ -28,14 +38,7 @@ async function classifyWithAPI(
     });
     if (!response.ok) return null;
     const data = (await response.json()) as { archetype: string; confidence: number };
-    const validArchetypes: Archetype[] = [
-      "failure-laundering",
-      "engagement-farming",
-      "status-packaging",
-      "ai-sludge",
-      "consensus-wisdom",
-    ];
-    if (validArchetypes.includes(data.archetype as Archetype)) {
+    if (ARCHETYPES.includes(data.archetype as Archetype)) {
       return data.archetype as Archetype;
     }
     return null;
@@ -125,5 +128,23 @@ export async function translatePost(
       ok: false,
       error: { error: "network_error", message: "Could not reach the Decoded API. Check your connection." },
     };
+  }
+}
+
+export async function sendFlagFeedback(payload: {
+  hash: string;
+  archetype: Archetype;
+  reason?: string;
+}): Promise<boolean> {
+  try {
+    const settings = await getSettings();
+    const response = await fetch(`${settings.apiUrl}/feedback`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return response.ok;
+  } catch {
+    return false;
   }
 }

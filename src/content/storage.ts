@@ -1,27 +1,24 @@
-export interface Settings {
-  enabled: boolean;
-  showAIScore: boolean;
-  autoCollapseEngagementBait: boolean;
-  showCommentLabels: boolean;
-  showArchetypeLabels: boolean;
-  apiUrl: string;
-}
+import { DEFAULT_SETTINGS, FREE_DAILY_LIMIT, type Settings } from "../shared/constants";
+
+export type { Settings } from "../shared/constants";
+export { FREE_DAILY_LIMIT } from "../shared/constants";
 
 export interface DailyUsage {
   count: number;
   date: string;
 }
 
-const DEFAULT_SETTINGS: Settings = {
-  enabled: true,
-  showAIScore: true,
-  autoCollapseEngagementBait: true,
-  showCommentLabels: true,
-  showArchetypeLabels: true,
-  apiUrl: "https://decoded-api.replit.app/api",
-};
+export interface FlaggedTranslation {
+  hash: string;
+  text: string;
+  translation: string;
+  archetype: string;
+  reason?: string;
+  flaggedAt: number;
+}
 
-export const FREE_DAILY_LIMIT = 5;
+const FLAGGED_KEY = "flagged_translations";
+const MAX_FLAGGED = 100;
 
 function todayString(): string {
   return new Date().toISOString().split("T")[0];
@@ -70,7 +67,9 @@ export async function canDecode(): Promise<boolean> {
   return usage.count < FREE_DAILY_LIMIT;
 }
 
-export async function getCachedResult(postHash: string): Promise<{ translation: string; archetype: string } | null> {
+export async function getCachedResult(
+  postHash: string
+): Promise<{ translation: string; archetype: string } | null> {
   return new Promise((resolve) => {
     chrome.storage.local.get([`cache_${postHash}`], (result) => {
       const cached = result[`cache_${postHash}`];
@@ -104,4 +103,24 @@ export function hashText(text: string): string {
     h = h & h;
   }
   return Math.abs(h).toString(36);
+}
+
+export async function flagTranslation(entry: Omit<FlaggedTranslation, "flaggedAt">): Promise<void> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([FLAGGED_KEY], (result) => {
+      const existing: FlaggedTranslation[] = Array.isArray(result[FLAGGED_KEY])
+        ? result[FLAGGED_KEY]
+        : [];
+      const next = [{ ...entry, flaggedAt: Date.now() }, ...existing].slice(0, MAX_FLAGGED);
+      chrome.storage.local.set({ [FLAGGED_KEY]: next }, () => resolve());
+    });
+  });
+}
+
+export async function getFlaggedTranslations(): Promise<FlaggedTranslation[]> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([FLAGGED_KEY], (result) => {
+      resolve(Array.isArray(result[FLAGGED_KEY]) ? result[FLAGGED_KEY] : []);
+    });
+  });
 }
