@@ -1,5 +1,6 @@
 import { type RuntimeMessage, type Settings } from "../shared/constants";
 import { classifyPost } from "./classifier";
+import { syncAuthorScore } from "./backendSync";
 import { getSettings, recordAuthorScore } from "./storage";
 import {
   configurePlatformSelectors,
@@ -74,11 +75,16 @@ async function processTweet(postEl: Element, settings: Settings): Promise<void> 
     source: "twitter",
     author: author?.name,
     authorHandle: author?.handle,
+    settings,
   };
   lastResultByPost.set(postEl, { result, text, context });
 
   if (author?.name) {
-    void recordAuthorScore(author.name, result.archetype, result.aiScore, "twitter", author.handle);
+    void recordAuthorScore(author.name, result.archetype, result.aiScore, "twitter", author.handle).then(
+      (score) => {
+        if (score) void syncAuthorScore(settings, score);
+      },
+    );
   }
 
   const inline = settings.inlineMode;

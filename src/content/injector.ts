@@ -16,12 +16,16 @@ import {
 } from "./classifier";
 import { translatePost, sendFlagFeedback } from "./api";
 import {
+  getSettings,
   getDailyUsage,
   flagTranslation,
   hashText,
   addToHistory,
   getAuthorScore,
+  followAuthor,
+  isFollowingAuthor,
 } from "./storage";
+import { syncDecodeEvent, syncFollowedAuthor } from "./backendSync";
 import { generateShareCard, downloadShareCard, copyShareCardToClipboard } from "./shareCard";
 import { judgeWithLocalLLM, checkLocalLLMAvailability } from "./aiDetector";
 
@@ -189,9 +193,9 @@ export function injectAIScoreBadge(
     </div>
   `;
 
-  const header = postEl.querySelector(
-    ".update-components-actor, .feed-shared-actor, .feed-shared-update-v2__actor"
-  );
+  const header = platformSelectors.authorHeader
+    .map((sel) => postEl.querySelector(sel))
+    .find((el): el is Element => Boolean(el));
   if (header) {
     header.appendChild(badge);
   }
@@ -220,6 +224,7 @@ export async function injectAuthorTrustBadge(
   const color = getScoreColor(avg);
   const dominant = Object.entries(score.archetypeCounts).sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0];
   const dominantLabel = dominant ? dominant[0] : "";
+  const isFollowing = await isFollowingAuthor(authorName, source);
 
   const badge = document.createElement("div");
   badge.className = inline ? "decoded-trust-badge decoded-inline" : "decoded-trust-badge";
@@ -227,6 +232,9 @@ export async function injectAuthorTrustBadge(
   badge.innerHTML = `
     <span class="decoded-trust-icon" aria-hidden="true">📊</span>
     <span class="decoded-trust-text">avg ${avg}% AI · ${score.postCount} posts</span>
+    <button class="decoded-follow-author" type="button" aria-label="Follow this author">
+      ${isFollowing ? "Following" : "Follow"}
+    </button>
     <div class="decoded-score-tooltip">
       <strong>Author trust — ${escapeHtml(authorName)}</strong>
       <div>Average AI score: ${avg}% across ${score.postCount} posts</div>
@@ -239,6 +247,20 @@ export async function injectAuthorTrustBadge(
     .map((sel) => postEl.querySelector(sel))
     .find((el): el is Element => Boolean(el));
   if (header) header.appendChild(badge);
+
+  const followBtn = badge.querySelector(".decoded-follow-author") as HTMLButtonElement | null;
+  followBtn?.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    followBtn.disabled = true;
+    const followed = await followAuthor(authorName, source, score.handle);
+    if (followed) {
+      followBtn.textContent = "Following";
+      const settings = await getSettings();
+      void syncFollowedAuthor(settings, source, followed.author, followed.handle);
+    }
+    followBtn.disabled = false;
+  });
 }
 
 export async function recordHistory(args: {
@@ -248,9 +270,10 @@ export async function recordHistory(args: {
   source: "linkedin" | "twitter";
   author?: string;
   authorHandle?: string;
+  settings: Settings;
 }): Promise<void> {
   const excerpt = args.text.replace(/\s+/g, " ").trim().slice(0, 220);
-  await addToHistory({
+  const historyEntry = {
     hash: hashText(args.text),
     excerpt,
     translation: args.translation,
@@ -259,7 +282,9 @@ export async function recordHistory(args: {
     source: args.source,
     author: args.author,
     authorHandle: args.authorHandle,
-  });
+  };
+  await addToHistory(historyEntry);
+  void syncDecodeEvent(args.settings, historyEntry);
 }
 
 export function injectArchetypeBadge(
@@ -316,6 +341,7 @@ export interface DecodeContext {
   source: "linkedin" | "twitter";
   author?: string;
   authorHandle?: string;
+  settings?: Settings;
 }
 
 export async function runDecode(
@@ -393,6 +419,7 @@ export async function runDecode(
     source: context?.source ?? "linkedin",
     author: context?.author,
     authorHandle: context?.authorHandle,
+    settings: context?.settings ?? (await getSettings()),
   });
 }
 

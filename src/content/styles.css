@@ -523,3 +523,25 @@
 .decoded-trust-text {
   white-space: nowrap;
 }
+
+.decoded-follow-author {
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  cursor: pointer;
+  opacity: 0.85;
+}
+
+.decoded-follow-author:hover {
+  opacity: 1;
+}
+
+.decoded-follow-author:disabled {
+  cursor: default;
+  opacity: 0.55;
+}

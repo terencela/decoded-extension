@@ -39,12 +39,21 @@ export interface AuthorScore {
   lastSeen: number;
 }
 
+export interface FollowedAuthor {
+  author: string;
+  handle?: string;
+  source: "linkedin" | "twitter";
+  followedAt: number;
+}
+
 const FLAGGED_KEY = "flagged_translations";
 const HISTORY_KEY = "decode_history";
 const AUTHOR_KEY = "author_scores";
+const FOLLOWED_AUTHORS_KEY = "followed_authors";
 const MAX_FLAGGED = 100;
 const MAX_HISTORY = 50;
 const MAX_AUTHORS = 500;
+const MAX_FOLLOWED_AUTHORS = 100;
 
 function todayString(): string {
   return new Date().toISOString().split("T")[0];
@@ -179,7 +188,7 @@ export async function clearHistory(): Promise<void> {
   });
 }
 
-function authorKey(author: string, source: "linkedin" | "twitter"): string {
+export function authorKey(author: string, source: "linkedin" | "twitter"): string {
   return `${source}::${author.toLowerCase().trim()}`;
 }
 
@@ -189,8 +198,8 @@ export async function recordAuthorScore(
   aiScore: number,
   source: "linkedin" | "twitter",
   handle?: string,
-): Promise<void> {
-  if (!author || author.length < 2) return;
+): Promise<AuthorScore | null> {
+  if (!author || author.length < 2) return null;
   return new Promise((resolve) => {
     chrome.storage.local.get([AUTHOR_KEY], (result) => {
       const existing: Record<string, AuthorScore> =
@@ -231,10 +240,10 @@ export async function recordAuthorScore(
           .slice(0, MAX_AUTHORS);
         const trimmed: Record<string, AuthorScore> = {};
         for (const [k] of sorted) trimmed[k] = existing[k];
-        chrome.storage.local.set({ [AUTHOR_KEY]: trimmed }, () => resolve());
+        chrome.storage.local.set({ [AUTHOR_KEY]: trimmed }, () => resolve(next));
         return;
       }
-      chrome.storage.local.set({ [AUTHOR_KEY]: existing }, () => resolve());
+      chrome.storage.local.set({ [AUTHOR_KEY]: existing }, () => resolve(next));
     });
   });
 }
@@ -264,5 +273,84 @@ export async function getAllAuthorScores(): Promise<AuthorScore[]> {
 export async function clearAuthorScores(): Promise<void> {
   return new Promise((resolve) => {
     chrome.storage.local.remove([AUTHOR_KEY], () => resolve());
+  });
+}
+
+export async function followAuthor(
+  author: string,
+  source: "linkedin" | "twitter",
+  handle?: string,
+): Promise<FollowedAuthor | null> {
+  if (!author || author.length < 2) return null;
+  return new Promise((resolve) => {
+    chrome.storage.local.get([FOLLOWED_AUTHORS_KEY], (result) => {
+      const existing: Record<string, FollowedAuthor> =
+        result[FOLLOWED_AUTHORS_KEY] && typeof result[FOLLOWED_AUTHORS_KEY] === "object"
+          ? (result[FOLLOWED_AUTHORS_KEY] as Record<string, FollowedAuthor>)
+          : {};
+      const key = authorKey(author, source);
+      const entry: FollowedAuthor = {
+        author,
+        handle,
+        source,
+        followedAt: Date.now(),
+      };
+      existing[key] = entry;
+
+      const keys = Object.keys(existing);
+      if (keys.length > MAX_FOLLOWED_AUTHORS) {
+        const sorted = keys
+          .map((k) => [k, existing[k].followedAt] as const)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, MAX_FOLLOWED_AUTHORS);
+        const trimmed: Record<string, FollowedAuthor> = {};
+        for (const [k] of sorted) trimmed[k] = existing[k];
+        chrome.storage.local.set({ [FOLLOWED_AUTHORS_KEY]: trimmed }, () => resolve(entry));
+        return;
+      }
+
+      chrome.storage.local.set({ [FOLLOWED_AUTHORS_KEY]: existing }, () => resolve(entry));
+    });
+  });
+}
+
+export async function unfollowAuthor(
+  author: string,
+  source: "linkedin" | "twitter",
+): Promise<void> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([FOLLOWED_AUTHORS_KEY], (result) => {
+      const existing: Record<string, FollowedAuthor> =
+        result[FOLLOWED_AUTHORS_KEY] && typeof result[FOLLOWED_AUTHORS_KEY] === "object"
+          ? (result[FOLLOWED_AUTHORS_KEY] as Record<string, FollowedAuthor>)
+          : {};
+      delete existing[authorKey(author, source)];
+      chrome.storage.local.set({ [FOLLOWED_AUTHORS_KEY]: existing }, () => resolve());
+    });
+  });
+}
+
+export async function isFollowingAuthor(
+  author: string,
+  source: "linkedin" | "twitter",
+): Promise<boolean> {
+  if (!author) return false;
+  return new Promise((resolve) => {
+    chrome.storage.local.get([FOLLOWED_AUTHORS_KEY], (result) => {
+      const existing: Record<string, FollowedAuthor> =
+        result[FOLLOWED_AUTHORS_KEY] && typeof result[FOLLOWED_AUTHORS_KEY] === "object"
+          ? (result[FOLLOWED_AUTHORS_KEY] as Record<string, FollowedAuthor>)
+          : {};
+      resolve(Boolean(existing[authorKey(author, source)]));
+    });
+  });
+}
+
+export async function getFollowedAuthors(): Promise<FollowedAuthor[]> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([FOLLOWED_AUTHORS_KEY], (result) => {
+      const existing = (result[FOLLOWED_AUTHORS_KEY] || {}) as Record<string, FollowedAuthor>;
+      resolve(Object.values(existing));
+    });
   });
 }

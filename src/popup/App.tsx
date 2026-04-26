@@ -11,6 +11,8 @@ import {
   type Settings,
   type UsageResponse,
 } from "../shared/constants";
+import { syncEmailOptIn, syncFollowedAuthor, syncInstall } from "../content/backendSync";
+import { authorKey, type FollowedAuthor } from "../content/storage";
 
 interface HistoryEntry {
   hash: string;
@@ -92,15 +94,23 @@ export default function App() {
   const [usage, setUsage] = useState<UsageResponse>({ count: 0, limit: FREE_DAILY_LIMIT });
   const [showApiInput, setShowApiInput] = useState(false);
   const [apiUrlInput, setApiUrlInput] = useState("");
+  const [backendUrlInput, setBackendUrlInput] = useState("");
+  const [backendAnonKeyInput, setBackendAnonKeyInput] = useState("");
+  const [emailInput, setEmailInput] = useState("");
   const [saved, setSaved] = useState(false);
+  const [backendSaved, setBackendSaved] = useState(false);
+  const [backendError, setBackendError] = useState("");
+  const [emailSaved, setEmailSaved] = useState(false);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [authors, setAuthors] = useState<AuthorScore[]>([]);
+  const [followedAuthors, setFollowedAuthors] = useState<Record<string, FollowedAuthor>>({});
 
   const loadHistoryAndAuthors = useCallback(() => {
-    chrome.storage.local.get(["decode_history", "author_scores"], (result) => {
+    chrome.storage.local.get(["decode_history", "author_scores", "followed_authors"], (result) => {
       setHistory(Array.isArray(result.decode_history) ? result.decode_history : []);
       const scores = (result.author_scores || {}) as Record<string, AuthorScore>;
       setAuthors(Object.values(scores));
+      setFollowedAuthors((result.followed_authors || {}) as Record<string, FollowedAuthor>);
     });
   }, []);
 
@@ -109,6 +119,9 @@ export default function App() {
       const merged = { ...DEFAULT_SETTINGS, ...(result.settings || {}) };
       setSettings(merged);
       setApiUrlInput(merged.apiUrl);
+      setBackendUrlInput(merged.backendUrl);
+      setBackendAnonKeyInput(merged.backendAnonKey);
+      setEmailInput(merged.emailDigestAddress);
 
       const today = new Date().toISOString().split("T")[0];
       const u = result.usage as { count: number; date: string } | undefined;
@@ -155,6 +168,62 @@ export default function App() {
     updateSetting("apiUrl", apiUrlInput.trim() || DEFAULT_SETTINGS.apiUrl);
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
+  };
+
+  const saveBackendSettings = () => {
+    const trimmedBackendUrl = backendUrlInput.trim();
+    const trimmedAnonKey = backendAnonKeyInput.trim();
+    if (settings.backendSyncEnabled) {
+      if (!trimmedBackendUrl.startsWith("https://") || !trimmedAnonKey) {
+        setBackendError("Use an https:// Supabase URL and anon key before enabling sync.");
+        return;
+      }
+    }
+    setBackendError("");
+    const updated = {
+      ...settings,
+      backendUrl: trimmedBackendUrl,
+      backendAnonKey: trimmedAnonKey,
+    };
+    setSettings(updated);
+    chrome.storage.local.set({ settings: updated }, () => {
+      chrome.storage.local.get(["backend_install_synced"], (result) => {
+        if (!result.backend_install_synced && updated.backendSyncEnabled) {
+          void syncInstall(updated).then((syncResult) => {
+            if (syncResult.ok) chrome.storage.local.set({ backend_install_synced: true });
+          });
+        }
+      });
+      setBackendSaved(true);
+      setTimeout(() => setBackendSaved(false), 2000);
+    });
+  };
+
+  const saveEmailDigest = () => {
+    const email = emailInput.trim();
+    if (!email) return;
+    const updated = { ...settings, emailDigestAddress: email };
+    setSettings(updated);
+    chrome.storage.local.set({ settings: updated }, () => {
+      void syncEmailOptIn(updated, email);
+      setEmailSaved(true);
+      setTimeout(() => setEmailSaved(false), 2000);
+    });
+  };
+
+  const followAuthorFromPopup = (author: AuthorScore) => {
+    const key = authorKey(author.author, author.source);
+    const entry: FollowedAuthor = {
+      author: author.author,
+      handle: author.handle,
+      source: author.source,
+      followedAt: Date.now(),
+    };
+    const next = { ...followedAuthors, [key]: entry };
+    setFollowedAuthors(next);
+    chrome.storage.local.set({ followed_authors: next }, () => {
+      void syncFollowedAuthor(settings, author.source, author.author, author.handle);
+    });
   };
 
   const usagePercent = Math.min(100, Math.round((usage.count / Math.max(usage.limit, 1)) * 100));
@@ -299,6 +368,65 @@ export default function App() {
               </button>
             </div>
             <div style={styles.apiHint}>Self-host the Decoded API and enter your URL here.</div>
+
+            <div style={styles.advancedDivider} />
+            <Toggle
+              label="Anonymous backend sync"
+              value={settings.backendSyncEnabled}
+              onChange={(v) => updateSetting("backendSyncEnabled", v)}
+              sublabel="Optional. Sends anonymous aggregates for follows, digests, and future leaderboards."
+            />
+            <label style={styles.apiLabel} htmlFor="decoded-backend-url">
+              Supabase project URL
+            </label>
+            <input
+              id="decoded-backend-url"
+              style={{ ...styles.apiInput, width: "100%", boxSizing: "border-box" }}
+              value={backendUrlInput}
+              onChange={(e) => setBackendUrlInput(e.target.value)}
+              placeholder="https://your-project.supabase.co"
+            />
+            <label style={{ ...styles.apiLabel, marginTop: "8px" }} htmlFor="decoded-backend-key">
+              Supabase anon key
+            </label>
+            <div style={styles.apiRow}>
+              <input
+                id="decoded-backend-key"
+                style={styles.apiInput}
+                type="password"
+                value={backendAnonKeyInput}
+                onChange={(e) => setBackendAnonKeyInput(e.target.value)}
+                placeholder="eyJhbGciOi..."
+              />
+              <button type="button" style={styles.apiSave} onClick={saveBackendSettings}>
+                {backendSaved ? "✓" : "Save"}
+              </button>
+            </div>
+            <div style={styles.apiHint}>
+              Sync is off unless this toggle is enabled and both Supabase fields are set.
+            </div>
+            {backendError && <div style={styles.errorText}>{backendError}</div>}
+
+            <div style={styles.advancedDivider} />
+            <label style={styles.apiLabel} htmlFor="decoded-digest-email">
+              Weekly digest email
+            </label>
+            <div style={styles.apiRow}>
+              <input
+                id="decoded-digest-email"
+                style={styles.apiInput}
+                type="email"
+                value={emailInput}
+                onChange={(e) => setEmailInput(e.target.value)}
+                placeholder="you@example.com"
+              />
+              <button type="button" style={styles.apiSave} onClick={saveEmailDigest}>
+                {emailSaved ? "✓" : "Opt in"}
+              </button>
+            </div>
+            <div style={styles.apiHint}>
+              Saves your email locally and sends opt-in only if backend sync is enabled.
+            </div>
           </div>
         )}
       </div>
@@ -383,6 +511,7 @@ export default function App() {
               <div style={styles.list}>
                 {sortedAuthors.map((a) => {
                   const color = getScoreColor(a.avg);
+                  const isFollowed = Boolean(followedAuthors[authorKey(a.author, a.source)]);
                   const dominant = Object.entries(a.archetypeCounts)
                     .sort((x, y) => (y[1] ?? 0) - (x[1] ?? 0))[0];
                   return (
@@ -403,6 +532,17 @@ export default function App() {
                           Most common: {ARCHETYPE_EMOJIS[dominant[0] as Archetype]} {getArchetypeLabel(dominant[0] as Archetype)}
                         </div>
                       )}
+                      <button
+                        type="button"
+                        style={{
+                          ...styles.followBtn,
+                          ...(isFollowed ? styles.followBtnActive : {}),
+                        }}
+                        onClick={() => followAuthorFromPopup(a)}
+                        disabled={isFollowed}
+                      >
+                        {isFollowed ? "Following" : "Follow author"}
+                      </button>
                     </div>
                   );
                 })}
@@ -619,6 +759,17 @@ const styles: Record<string, React.CSSProperties> = {
     color: "#555",
     marginTop: "4px",
   },
+  errorText: {
+    fontSize: "10px",
+    color: "#ef4444",
+    marginTop: "6px",
+    lineHeight: 1.4,
+  },
+  advancedDivider: {
+    height: "1px",
+    background: "#1a1a28",
+    margin: "12px 0",
+  },
   footer: {
     padding: "10px 16px 8px",
   },
@@ -811,5 +962,22 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: "10px",
     color: "#666",
     marginTop: "5px",
+  },
+  followBtn: {
+    marginTop: "8px",
+    background: "transparent",
+    border: "1px solid #2a2a3a",
+    borderRadius: "6px",
+    padding: "5px 8px",
+    color: "#7b9dff",
+    fontSize: "11px",
+    cursor: "pointer",
+    fontFamily: "inherit",
+    fontWeight: 700,
+  },
+  followBtnActive: {
+    color: "#22c55e",
+    borderColor: "#22c55e55",
+    cursor: "default",
   },
 };

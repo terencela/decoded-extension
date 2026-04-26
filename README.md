@@ -58,6 +58,7 @@ Load `dist/` as an unpacked extension at `chrome://extensions`.
 - Manifest V3 · TypeScript strict · React 18 popup · Vite + `vite-plugin-web-extension`
 - Three-layer detector: regex → statistics → on-device Gemini Nano (Chrome 138+ Prompt API)
 - 24h LRU cache of decoded translations to keep API calls cheap
+- Optional Supabase backend spine for anonymous install/decode/author/follow/email opt-in events. See `BACKEND.md`.
 
 ## Privacy
 
@@ -65,6 +66,7 @@ Load `dist/` as an unpacked extension at `chrome://extensions`.
 - Layer 3 (on-device LLM) uses Chrome's built-in Gemini Nano. The model lives on your device. Nothing leaves your machine.
 - The remote translation API is only called when you click **Decode** on a borderline post.
 - Settings, usage counters, decode history, and per-author trust scores are stored locally in `chrome.storage.local`. They never sync, never leave your browser, and you can wipe them from the popup with one click.
+- Anonymous backend sync is opt-in from Advanced settings. When enabled, it sends aggregate events to your configured Supabase project for follows, weekly digests, and future leaderboard data.
 
 ## Enable on-device AI (optional)
 

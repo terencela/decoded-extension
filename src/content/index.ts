@@ -1,5 +1,6 @@
 import { type RuntimeMessage, type Settings } from "../shared/constants";
 import { classifyPost } from "./classifier";
+import { syncAuthorScore } from "./backendSync";
 import { getSettings, recordAuthorScore } from "./storage";
 import {
   extractAuthor,
@@ -52,11 +53,16 @@ async function processPost(postEl: Element, settings: Settings): Promise<void> {
     source: "linkedin",
     author: author?.name,
     authorHandle: author?.handle,
+    settings,
   };
   lastResultByPost.set(postEl, { result, text, context });
 
   if (author?.name) {
-    void recordAuthorScore(author.name, result.archetype, result.aiScore, "linkedin", author.handle);
+    void recordAuthorScore(author.name, result.archetype, result.aiScore, "linkedin", author.handle).then(
+      (score) => {
+        if (score) void syncAuthorScore(settings, score);
+      },
+    );
   }
 
   if (settings.autoCollapseEngagementBait && result.isHardEngagementFarming) {

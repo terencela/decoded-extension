@@ -49,6 +49,10 @@ export interface Settings {
   showArchetypeLabels: boolean;
   inlineMode: boolean;
   apiUrl: string;
+  backendSyncEnabled: boolean;
+  backendUrl: string;
+  backendAnonKey: string;
+  emailDigestAddress: string;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -59,6 +63,10 @@ export const DEFAULT_SETTINGS: Settings = {
   showArchetypeLabels: true,
   inlineMode: false,
   apiUrl: DEFAULT_API_URL,
+  backendSyncEnabled: false,
+  backendUrl: "",
+  backendAnonKey: "",
+  emailDigestAddress: "",
 };
 
 export type RuntimeMessage =
