@@ -1,19 +1,25 @@
 import { type RuntimeMessage, type Settings } from "../shared/constants";
 import { classifyPost } from "./classifier";
-import { getSettings } from "./storage";
+import { getSettings, recordAuthorScore } from "./storage";
 import {
+  extractAuthor,
   extractPostText,
   collapseEngagementFarming,
   injectAIScoreBadge,
   injectArchetypeBadge,
+  injectAuthorTrustBadge,
   injectDecodeButton,
   injectCommentLabels,
   runDecode,
+  type DecodeContext,
 } from "./injector";
 
 let processedPosts = new WeakSet<Element>();
 let hoveredPost: Element | null = null;
-const lastResultByPost = new WeakMap<Element, { result: ReturnType<typeof classifyPost>; text: string }>();
+const lastResultByPost = new WeakMap<
+  Element,
+  { result: ReturnType<typeof classifyPost>; text: string; context: DecodeContext }
+>();
 
 const POST_SELECTORS = [
   ".feed-shared-update-v2",
@@ -41,7 +47,17 @@ async function processPost(postEl: Element, settings: Settings): Promise<void> {
   if (!settings.enabled) return;
 
   const result = classifyPost(text);
-  lastResultByPost.set(postEl, { result, text });
+  const author = extractAuthor(postEl);
+  const context: DecodeContext = {
+    source: "linkedin",
+    author: author?.name,
+    authorHandle: author?.handle,
+  };
+  lastResultByPost.set(postEl, { result, text, context });
+
+  if (author?.name) {
+    void recordAuthorScore(author.name, result.archetype, result.aiScore, "linkedin", author.handle);
+  }
 
   if (settings.autoCollapseEngagementBait && result.isHardEngagementFarming) {
     collapseEngagementFarming(postEl);
@@ -57,13 +73,17 @@ async function processPost(postEl: Element, settings: Settings): Promise<void> {
     injectArchetypeBadge(postEl, result, inline);
   }
 
+  if (author?.name) {
+    void injectAuthorTrustBadge(postEl, author.name, "linkedin", inline);
+  }
+
   if (inline) {
-    injectDecodeButton(postEl, result, text, true);
+    injectDecodeButton(postEl, result, text, true, context);
   } else {
     postEl.addEventListener("mouseenter", () => {
       postEl.classList.add("decoded-post-hovered");
       hoveredPost = postEl;
-      injectDecodeButton(postEl, result, text, false);
+      injectDecodeButton(postEl, result, text, false, context);
     });
 
     postEl.addEventListener("mouseleave", () => {
@@ -140,7 +160,7 @@ document.addEventListener(
     if (!cached) return;
 
     event.preventDefault();
-    runDecode(postUnderCursor, cached.result, cached.text);
+    runDecode(postUnderCursor, cached.result, cached.text, null, cached.context);
   },
   true
 );
@@ -163,6 +183,6 @@ chrome.runtime.onMessage.addListener((msg: unknown) => {
   if (m.type === "DECODE_HOVERED") {
     if (!hoveredPost) return;
     const cached = lastResultByPost.get(hoveredPost);
-    if (cached) runDecode(hoveredPost, cached.result, cached.text);
+    if (cached) runDecode(hoveredPost, cached.result, cached.text, null, cached.context);
   }
 });

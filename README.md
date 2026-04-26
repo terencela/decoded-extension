@@ -1,23 +1,26 @@
-# Decoded — LinkedIn Translator
+# Decoded — LinkedIn & X Translator
 
-Chrome Extension (Manifest V3) that translates corporate-speak and AI-generated content on LinkedIn in real time.
+Chrome Extension (Manifest V3) that translates corporate-speak and AI-generated content on LinkedIn and X (Twitter) in real time.
 
-Pangram tells you *if* text is AI. Decoded tells you *what a LinkedIn post is actually doing.* Different jobs.
+Pangram tells you *if* text is AI. Decoded tells you *what a post is actually doing*, *who keeps doing it*, and *which patterns repeat.* Different jobs.
 
 ## What it does
 
+- **Works on LinkedIn AND X (Twitter)** — same detector, same UI, both feeds
 - **5 behavior archetypes** — Failure Laundering, Engagement Farming, Status Packaging, AI Sludge, Consensus Wisdom
 - **Three-layer AI detection** — score 0-100 with confidence band (Almost certainly AI / Likely AI / Mixed signals / Probably human)
   - **Layer 1 (regex):** 60+ patterns covering vocabulary, structural tells, and tropes.fyi formulas (negative parallelism, triple negation, fragment reveals, invented concept labels, "serves as" dodge, vague attribution, etc.)
   - **Layer 2 (statistics):** burstiness, lexical diversity, anaphora abuse, proper-noun density, em-dash overuse, parallel structure, one-sentence-per-line formatting
   - **Layer 3 (on-device LLM):** opt-in second pass via Chrome built-in Gemini Nano. Runs fully on-device — no data leaves your machine. Auto-detected, gracefully off if unavailable.
+- **Per-author trust score** — local rolling average AI score per author across both feeds. Repeat-offender badge appears once we've seen 3+ posts from the same person.
+- **Decode history** — last 50 decoded posts in the popup, with archetype, score, source platform, and the translation. All local.
 - **Plain-English translation** — one tap, get the post's real meaning with highlighted phrases
 - **Auto-collapse engagement bait** — hide hard farming posts behind a banner
 - **AI comment detection** — flag AI-generated comments inline
 - **Shareable 1200×630 receipt cards** — ready for X, Stories, Slack
 - **Always-on inline mode** — show badges and decode button without hover
 - **Keyboard shortcut** — `Ctrl/⌘ + Shift + D` decodes the post under the cursor
-- **Local-first storage** — flagged translations and decode history live in `chrome.storage.local`
+- **Local-first storage** — flagged translations, decode history, and author trust scores live in `chrome.storage.local`. Nothing syncs anywhere.
 
 ## Pricing
 
@@ -27,9 +30,11 @@ Free: 5 decodes/day · Pro: $3/mo · Power: $5/mo
 
 | Capability | Decoded | Pangram |
 |---|---|---|
-| Lives in your LinkedIn feed | Yes | No (paste into textbox) |
+| Lives in your feed | Yes (LinkedIn + X) | No (paste into textbox) |
 | Behavior archetypes (5 types) | Yes | No (only human/AI) |
 | Plain-English translation | Yes | No (just a score) |
+| Per-author trust score (local) | Yes | No |
+| Decode history (local) | Yes | No |
 | Auto-collapses engagement bait | Yes | No |
 | Shareable receipt cards | Yes | No |
 | AI detection layers | regex + statistics + on-device LLM | proprietary ML |
@@ -59,7 +64,7 @@ Load `dist/` as an unpacked extension at `chrome://extensions`.
 - Layers 1 (regex) and 2 (statistics) run entirely in your browser tab — no network calls.
 - Layer 3 (on-device LLM) uses Chrome's built-in Gemini Nano. The model lives on your device. Nothing leaves your machine.
 - The remote translation API is only called when you click **Decode** on a borderline post.
-- Settings, usage counters, and flagged translations are stored locally in `chrome.storage.local`.
+- Settings, usage counters, decode history, and per-author trust scores are stored locally in `chrome.storage.local`. They never sync, never leave your browser, and you can wipe them from the popup with one click.
 
 ## Enable on-device AI (optional)
 

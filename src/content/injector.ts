@@ -15,7 +15,13 @@ import {
   applyLocalLLMJudgment,
 } from "./classifier";
 import { translatePost, sendFlagFeedback } from "./api";
-import { getDailyUsage, flagTranslation, hashText } from "./storage";
+import {
+  getDailyUsage,
+  flagTranslation,
+  hashText,
+  addToHistory,
+  getAuthorScore,
+} from "./storage";
 import { generateShareCard, downloadShareCard, copyShareCardToClipboard } from "./shareCard";
 import { judgeWithLocalLLM, checkLocalLLMAvailability } from "./aiDetector";
 
@@ -25,6 +31,69 @@ const SOURCE_LABELS: Record<DetectionSource, string> = {
   "local-llm": "local AI",
   "remote-api": "cloud AI",
 };
+
+interface PlatformSelectors {
+  actionBar: string[];
+  authorHeader: string[];
+}
+
+let platformSelectors: PlatformSelectors = {
+  actionBar: [
+    ".feed-shared-social-action-bar",
+    ".social-actions-bar",
+    ".feed-shared-update-v2__social-actions",
+    ".social-detail-social-actions",
+    ".social-action-bar",
+    '[data-test-id="social-actions"]',
+  ],
+  authorHeader: [
+    ".update-components-actor",
+    ".feed-shared-actor",
+    ".feed-shared-update-v2__actor",
+  ],
+};
+
+export function configurePlatformSelectors(next: PlatformSelectors): void {
+  platformSelectors = next;
+}
+
+export function extractAuthor(postEl: Element): { name: string; handle?: string } | null {
+  const nameSelectors = [
+    ".update-components-actor__title span[aria-hidden='true']",
+    ".update-components-actor__title",
+    ".feed-shared-actor__name span[aria-hidden='true']",
+    ".feed-shared-actor__name",
+    ".update-components-actor__name",
+  ];
+  let name = "";
+  for (const sel of nameSelectors) {
+    const el = postEl.querySelector(sel);
+    if (el?.textContent?.trim()) {
+      name = el.textContent.trim().split("\n")[0].trim();
+      if (name.length >= 2) break;
+    }
+  }
+  if (!name) return null;
+
+  const linkSelectors = [
+    ".update-components-actor__container a[href*='/in/']",
+    ".update-components-actor__container a[href*='/company/']",
+    ".feed-shared-actor a[href*='/in/']",
+    ".feed-shared-actor a[href*='/company/']",
+  ];
+  let handle: string | undefined;
+  for (const sel of linkSelectors) {
+    const a = postEl.querySelector(sel) as HTMLAnchorElement | null;
+    if (a?.href) {
+      const m = a.href.match(/\/(in|company)\/([^/?#]+)/);
+      if (m?.[2]) {
+        handle = m[2];
+        break;
+      }
+    }
+  }
+  return { name, handle };
+}
 
 export function extractPostText(postEl: Element): string {
   const selectors = [
@@ -50,14 +119,7 @@ export function extractPostText(postEl: Element): string {
 }
 
 function getActionBar(postEl: Element): Element | null {
-  const selectors = [
-    ".feed-shared-social-action-bar",
-    ".social-actions-bar",
-    ".feed-shared-update-v2__social-actions",
-    ".social-action-bar",
-    '[data-test-id="social-actions"]',
-  ];
-  for (const sel of selectors) {
+  for (const sel of platformSelectors.actionBar) {
     const el = postEl.querySelector(sel);
     if (el) return el;
   }
@@ -143,6 +205,63 @@ function refreshAIScoreBadge(postEl: Element, result: ClassificationResult): voi
   injectAIScoreBadge(postEl, result, wasInline);
 }
 
+export async function injectAuthorTrustBadge(
+  postEl: Element,
+  authorName: string,
+  source: "linkedin" | "twitter",
+  inline = false,
+): Promise<void> {
+  if (postEl.querySelector(".decoded-trust-badge")) return;
+  const score = await getAuthorScore(authorName, source);
+  if (!score || score.postCount < 3) return;
+  const avg = Math.round(score.totalAIScore / score.postCount);
+  if (avg < 50) return;
+
+  const color = getScoreColor(avg);
+  const dominant = Object.entries(score.archetypeCounts).sort((a, b) => (b[1] ?? 0) - (a[1] ?? 0))[0];
+  const dominantLabel = dominant ? dominant[0] : "";
+
+  const badge = document.createElement("div");
+  badge.className = inline ? "decoded-trust-badge decoded-inline" : "decoded-trust-badge";
+  badge.style.cssText = `background:${color}18;border:1px solid ${color}44;color:${color};`;
+  badge.innerHTML = `
+    <span class="decoded-trust-icon" aria-hidden="true">📊</span>
+    <span class="decoded-trust-text">avg ${avg}% AI · ${score.postCount} posts</span>
+    <div class="decoded-score-tooltip">
+      <strong>Author trust — ${escapeHtml(authorName)}</strong>
+      <div>Average AI score: ${avg}% across ${score.postCount} posts</div>
+      ${dominantLabel ? `<div>Most common: ${escapeHtml(dominantLabel)}</div>` : ""}
+      <div style="opacity:0.6;margin-top:4px;font-size:10px">Tracked locally on your device only.</div>
+    </div>
+  `;
+
+  const header = platformSelectors.authorHeader
+    .map((sel) => postEl.querySelector(sel))
+    .find((el): el is Element => Boolean(el));
+  if (header) header.appendChild(badge);
+}
+
+export async function recordHistory(args: {
+  text: string;
+  translation: string;
+  result: ClassificationResult;
+  source: "linkedin" | "twitter";
+  author?: string;
+  authorHandle?: string;
+}): Promise<void> {
+  const excerpt = args.text.replace(/\s+/g, " ").trim().slice(0, 220);
+  await addToHistory({
+    hash: hashText(args.text),
+    excerpt,
+    translation: args.translation,
+    archetype: args.result.archetype,
+    aiScore: args.result.aiScore,
+    source: args.source,
+    author: args.author,
+    authorHandle: args.authorHandle,
+  });
+}
+
 export function injectArchetypeBadge(
   postEl: Element,
   result: ClassificationResult,
@@ -170,7 +289,8 @@ export function injectDecodeButton(
   postEl: Element,
   result: ClassificationResult,
   postText: string,
-  inline = false
+  inline = false,
+  context?: DecodeContext,
 ): void {
   if (postEl.querySelector(".decoded-decode-btn")) return;
 
@@ -181,7 +301,7 @@ export function injectDecodeButton(
   btn.setAttribute("aria-label", "Decode this post");
   btn.innerHTML = `<span class="decoded-btn-icon" aria-hidden="true">🔍</span><span class="decoded-btn-text">Decode</span>`;
 
-  btn.addEventListener("click", () => runDecode(postEl, result, postText, btn));
+  btn.addEventListener("click", () => runDecode(postEl, result, postText, btn, context));
 
   const actionBar = getActionBar(postEl);
   if (actionBar) {
@@ -192,11 +312,18 @@ export function injectDecodeButton(
   }
 }
 
+export interface DecodeContext {
+  source: "linkedin" | "twitter";
+  author?: string;
+  authorHandle?: string;
+}
+
 export async function runDecode(
   postEl: Element,
   result: ClassificationResult,
   postText: string,
-  btn?: HTMLButtonElement | null
+  btn?: HTMLButtonElement | null,
+  context?: DecodeContext,
 ): Promise<void> {
   const button = btn ?? (postEl.querySelector(".decoded-decode-btn") as HTMLButtonElement | null);
   const setIdle = () => {
@@ -258,6 +385,15 @@ export async function runDecode(
   showTranslationOverlay(postEl, translateResult.data.translation, workingResult, postText);
   setOpen();
   updateUsageDisplay();
+
+  void recordHistory({
+    text: postText,
+    translation: translateResult.data.translation,
+    result: workingResult,
+    source: context?.source ?? "linkedin",
+    author: context?.author,
+    authorHandle: context?.authorHandle,
+  });
 }
 
 async function updateUsageDisplay(): Promise<void> {

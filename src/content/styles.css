@@ -491,3 +491,35 @@
   color: #aaa;
   line-height: 1.5;
 }
+
+.decoded-trust-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: help;
+  position: relative;
+  margin-left: 6px;
+  vertical-align: middle;
+  opacity: 0;
+  transition: opacity 0.2s;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  z-index: 9;
+}
+
+.decoded-post-hovered .decoded-trust-badge,
+.decoded-trust-badge:hover,
+.decoded-trust-badge.decoded-inline {
+  opacity: 1;
+}
+
+.decoded-trust-badge:hover .decoded-score-tooltip {
+  display: block;
+}
+
+.decoded-trust-text {
+  white-space: nowrap;
+}

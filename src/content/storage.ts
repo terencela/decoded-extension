@@ -1,4 +1,4 @@
-import { DEFAULT_SETTINGS, FREE_DAILY_LIMIT, type Settings } from "../shared/constants";
+import { DEFAULT_SETTINGS, FREE_DAILY_LIMIT, type Settings, type Archetype } from "../shared/constants";
 
 export type { Settings } from "../shared/constants";
 export { FREE_DAILY_LIMIT } from "../shared/constants";
@@ -17,8 +17,34 @@ export interface FlaggedTranslation {
   flaggedAt: number;
 }
 
+export interface HistoryEntry {
+  hash: string;
+  excerpt: string;
+  translation: string;
+  archetype: Archetype;
+  aiScore: number;
+  source: "linkedin" | "twitter";
+  author?: string;
+  authorHandle?: string;
+  decodedAt: number;
+}
+
+export interface AuthorScore {
+  author: string;
+  handle?: string;
+  source: "linkedin" | "twitter";
+  totalAIScore: number;
+  postCount: number;
+  archetypeCounts: Partial<Record<Archetype, number>>;
+  lastSeen: number;
+}
+
 const FLAGGED_KEY = "flagged_translations";
+const HISTORY_KEY = "decode_history";
+const AUTHOR_KEY = "author_scores";
 const MAX_FLAGGED = 100;
+const MAX_HISTORY = 50;
+const MAX_AUTHORS = 500;
 
 function todayString(): string {
   return new Date().toISOString().split("T")[0];
@@ -122,5 +148,121 @@ export async function getFlaggedTranslations(): Promise<FlaggedTranslation[]> {
     chrome.storage.local.get([FLAGGED_KEY], (result) => {
       resolve(Array.isArray(result[FLAGGED_KEY]) ? result[FLAGGED_KEY] : []);
     });
+  });
+}
+
+export async function addToHistory(entry: Omit<HistoryEntry, "decodedAt">): Promise<void> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([HISTORY_KEY], (result) => {
+      const existing: HistoryEntry[] = Array.isArray(result[HISTORY_KEY])
+        ? result[HISTORY_KEY]
+        : [];
+      // De-dupe by hash; keep newest
+      const filtered = existing.filter((h) => h.hash !== entry.hash);
+      const next = [{ ...entry, decodedAt: Date.now() }, ...filtered].slice(0, MAX_HISTORY);
+      chrome.storage.local.set({ [HISTORY_KEY]: next }, () => resolve());
+    });
+  });
+}
+
+export async function getHistory(): Promise<HistoryEntry[]> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([HISTORY_KEY], (result) => {
+      resolve(Array.isArray(result[HISTORY_KEY]) ? result[HISTORY_KEY] : []);
+    });
+  });
+}
+
+export async function clearHistory(): Promise<void> {
+  return new Promise((resolve) => {
+    chrome.storage.local.remove([HISTORY_KEY], () => resolve());
+  });
+}
+
+function authorKey(author: string, source: "linkedin" | "twitter"): string {
+  return `${source}::${author.toLowerCase().trim()}`;
+}
+
+export async function recordAuthorScore(
+  author: string,
+  archetype: Archetype,
+  aiScore: number,
+  source: "linkedin" | "twitter",
+  handle?: string,
+): Promise<void> {
+  if (!author || author.length < 2) return;
+  return new Promise((resolve) => {
+    chrome.storage.local.get([AUTHOR_KEY], (result) => {
+      const existing: Record<string, AuthorScore> =
+        result[AUTHOR_KEY] && typeof result[AUTHOR_KEY] === "object"
+          ? (result[AUTHOR_KEY] as Record<string, AuthorScore>)
+          : {};
+      const key = authorKey(author, source);
+      const prior = existing[key];
+      const next: AuthorScore = prior
+        ? {
+            ...prior,
+            handle: prior.handle ?? handle,
+            totalAIScore: prior.totalAIScore + aiScore,
+            postCount: prior.postCount + 1,
+            archetypeCounts: {
+              ...prior.archetypeCounts,
+              [archetype]: (prior.archetypeCounts[archetype] ?? 0) + 1,
+            },
+            lastSeen: Date.now(),
+          }
+        : {
+            author,
+            handle,
+            source,
+            totalAIScore: aiScore,
+            postCount: 1,
+            archetypeCounts: { [archetype]: 1 },
+            lastSeen: Date.now(),
+          };
+      existing[key] = next;
+
+      // Cap total tracked authors by trimming oldest if over limit
+      const allKeys = Object.keys(existing);
+      if (allKeys.length > MAX_AUTHORS) {
+        const sorted = allKeys
+          .map((k) => [k, existing[k].lastSeen] as const)
+          .sort((a, b) => b[1] - a[1])
+          .slice(0, MAX_AUTHORS);
+        const trimmed: Record<string, AuthorScore> = {};
+        for (const [k] of sorted) trimmed[k] = existing[k];
+        chrome.storage.local.set({ [AUTHOR_KEY]: trimmed }, () => resolve());
+        return;
+      }
+      chrome.storage.local.set({ [AUTHOR_KEY]: existing }, () => resolve());
+    });
+  });
+}
+
+export async function getAuthorScore(
+  author: string,
+  source: "linkedin" | "twitter",
+): Promise<AuthorScore | null> {
+  if (!author) return null;
+  return new Promise((resolve) => {
+    chrome.storage.local.get([AUTHOR_KEY], (result) => {
+      const map = (result[AUTHOR_KEY] || {}) as Record<string, AuthorScore>;
+      resolve(map[authorKey(author, source)] ?? null);
+    });
+  });
+}
+
+export async function getAllAuthorScores(): Promise<AuthorScore[]> {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([AUTHOR_KEY], (result) => {
+      const map = (result[AUTHOR_KEY] || {}) as Record<string, AuthorScore>;
+      resolve(Object.values(map));
+    });
+  });
+}
+
+export async function clearAuthorScores(): Promise<void> {
+  return new Promise((resolve) => {
+    chrome.storage.local.remove([AUTHOR_KEY], () => resolve());
   });
 }
